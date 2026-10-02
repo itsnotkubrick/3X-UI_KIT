@@ -586,8 +586,18 @@ set_xray_core() {
       [[ -z "$target_bin" ]] && target_bin="/usr/local/x-ui/bin/xray-linux-amd64"
       cp -f "$tmp_dir/xray" "$target_bin"
       
-      systemctl restart x-ui >/dev/null 2>&1 || true
+            systemctl restart x-ui >/dev/null 2>&1 || true
       rm -rf "$tmp_dir"
+
+      # Ждем, пока панель поднимется и откроет порт 48070
+      for _ in $(seq 1 15); do
+        if curl -s --connect-timeout 1 http://127.0.0.1:48070 >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
+      sleep 1
+
     else
       warn "Не удалось скачать ядро Xray через зеркало"
       rm -rf "$tmp_dir"
