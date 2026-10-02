@@ -37,8 +37,15 @@ CLASH_UA = re.compile(r"clash|mihomo|flclash|stash|nyanpasu|meta", re.I)
 # тоже могут просить формат Clash (Karing так и делает), но AmneziaWG не умеют.
 NO_AWG_UA = re.compile(r"karing|hiddify|nekobox|sing-?box|husi|stash|shadowrocket|v2box|streisand|happ|loon|surge|quantumult", re.I)
 SUB_ID = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+# Заголовки Happ, которые 3X-UI отдаёт в подписке (маршрутизация, баннеры, настройки клиента).
+HAPP_HEADERS = ("routing", "routing-enable", "announce", "providerid", "new-url", "fallback-url",
+                "hide-settings", "no-limit-enabled", "ping-type", "color-profile", "tun-mode", "tun-type",
+                "exclude-routes", "exclude-apns-enable", "per-app-proxy-mode", "per-app-proxy-list",
+                "notification-subs-expire", "sub-expire", "sub-expire-button-link", "sub-info-text",
+                "sub-info-color", "sub-info-button-text", "sub-info-button-link",
+                "subscription-autoconnect", "subscription-autoconnect-type", "subscription-always-hwid-enable")
 PASS_HEADERS = ("content-type", "content-disposition", "profile-title", "profile-update-interval",
-                "profile-web-page-url", "subscription-userinfo", "support-url", "cache-control")
+                "profile-web-page-url", "subscription-userinfo", "support-url", "cache-control") + HAPP_HEADERS
 
 with open(CONFIG, encoding="utf-8") as f:
     CONF = json.load(f)
