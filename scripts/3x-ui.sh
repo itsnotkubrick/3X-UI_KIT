@@ -558,19 +558,46 @@ connect_panel() {
 }
 
 set_xray_core() {
+  local target_bin
+  target_bin=$(ls /usr/local/x-ui/bin/xray-linux-* 2>/dev/null | head -n 1)
   local cur_core
-  cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
-  if [[ $cur_core != "$XRAY_CORE" ]]; then
-    say "Ставлю ядро Xray $XRAY_CORE (совместимо с Hiddify, Mihomo и другими клиентами)"
-    api POST "server/installXray/$XRAY_CORE" '{}' >/dev/null
-    for _ in $(seq 1 30); do
-      cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
-      [[ $cur_core == "$XRAY_CORE" ]] && break
-      sleep 2
-    done
-    [[ $cur_core == "$XRAY_CORE" ]] || warn "Не удалось сменить ядро Xray (сейчас $cur_core). Клиенты на Mihomo и sing-box могут не подключиться."
+  cur_core=$($target_bin version 2>/dev/null | awk 'NR==1 {print "v" $2}')
+
+  if [[ "$cur_core" != "$XRAY_CORE" ]]; then
+    say "Ставлю ядро Xray $XRAY_CORE (скачивание через зеркало)..."
+
+    local arch
+    case "$(uname -m)" in
+      x86_64 | amd64)  arch="64" ;;
+      aarch64 | arm64) arch="arm64-v8a" ;;
+      *)               arch="64" ;;
+    esac
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local url="https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/${XRAY_CORE}/Xray-linux-${arch}.zip"
+
+    command -v unzip >/dev/null 2>&1 || apt-get install -y -qq unzip >/dev/null 2>&1
+
+    if curl -fsSL --connect-timeout 10 --retry 2 -o "$tmp_dir/xray.zip" "$url"; then
+      unzip -q -o "$tmp_dir/xray.zip" xray -d "$tmp_dir"
+      chmod +x "$tmp_dir/xray"
+      
+      [[ -z "$target_bin" ]] && target_bin="/usr/local/x-ui/bin/xray-linux-amd64"
+      cp -f "$tmp_dir/xray" "$target_bin"
+      
+      systemctl restart x-ui >/dev/null 2>&1 || true
+      rm -rf "$tmp_dir"
+    else
+      warn "Не удалось скачать ядро Xray через зеркало"
+      rm -rf "$tmp_dir"
+    fi
+
+    cur_core=$($target_bin version 2>/dev/null | awk 'NR==1 {print "v" $2}')
+    [[ "$cur_core" == "$XRAY_CORE" ]] || warn "Не удалось сменить ядро Xray (сейчас $cur_core)"
   fi
 }
+
 
 setup_ufw() {
   local ssh_port o
