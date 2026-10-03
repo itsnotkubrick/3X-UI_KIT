@@ -104,10 +104,37 @@ human() { # байты → «1.2 ГБ»
 
 sub_url() { echo "${SUB_BASE}$1"; }
 
+# Отдельные ссылки на протоколы – прямо из подписки 3X-UI внутри сервера (мимо kit-sub, который
+# прячет от VPN-приложений vpn:// и tg://). direct_links subId фильтр
+direct_links() {
+  local sid=$1 filter=$2 raw out="" suffix scheme
+  for suffix in "" -awg; do
+    raw=""
+    # Внутренняя подписка отвечает по http (всё на 443) или по https (свой порт с сертификатом).
+    for scheme in http https; do
+      raw=$(curl -fsSk -m 10 -A "v2rayN/7" -H "Host: $HOST" "$scheme://127.0.0.1:$SUB_INTERNAL$SUB_PATH$sid$suffix" 2>/dev/null) && [[ -n $raw ]] && break
+      raw=""
+    done
+    grep -q '://' <<<"$raw" || raw=$(base64 -d <<<"$raw" 2>/dev/null || true)
+    out+=$(grep -E "$filter" <<<"$raw" || true)$'\n'
+  done
+  [[ ${SINGLE:-no} == yes ]] && out=$(sed "s/^\(tg:\/\/proxy?\)\(.*\)port=${MTPROTO_INNER:-10445}/\1\2port=443/" <<<"$out")
+  echo; grep . <<<"$out" || echo "Отдельных ссылок нет."
+}
+
+# Панель «через SSH-туннель»: подписка слушает только 127.0.0.1, с телефона по ней не зайти.
+local_only_sub() { [[ ${SUB_BASE:-} == http://127.0.0.1* || ${SUB_BASE:-} == http://localhost* ]]; }
+
 show_link() { # имя subId
   local url
   url=$(sub_url "$2")
   echo
+  if local_only_sub; then
+    echo "Подписка ${B}$1${N} в этом режиме (панель через SSH-туннель) открывается только на самом сервере,"
+    echo "с телефона по ней не зайти. Подключайтесь отдельными ссылками на протоколы:"
+    direct_links "$2" '^[a-z0-9]+://'
+    return 0
+  fi
   echo "Подписка ${B}$1${N} – все протоколы одной ссылкой. Вставьте в Happ, Hiddify, Karing,"
   echo "v2rayN, Clash Verge или FlClash:"
   echo
@@ -148,21 +175,13 @@ cmd_add() {
 }
 
 cmd_link() {
-  local name=${1:-} all=${2:-} c
+  local name=${1:-} all=${2:-} c sid
   valid_name "$name"
   c=$(client "$name"); [[ -n $c ]] || die "Нет пользователя $name"
-  show_link "$name" "$(jq -r '.subId' <<<"$c")"
-  if [[ $all == --all ]]; then
-    local sid raw out="" suffix
-    sid=$(jq -r '.subId' <<<"$c")
-    for suffix in "" -awg; do
-      raw=$(curl -fsSk -m 10 -A "v2rayN/7" -H "Host: $HOST" "http://127.0.0.1:$SUB_INTERNAL$SUB_PATH$sid$suffix" 2>/dev/null || true)
-      grep -q '://' <<<"$raw" || raw=$(base64 -d <<<"$raw" 2>/dev/null || true)
-      out+=$(grep -E '^(vpn|tg)://' <<<"$raw" || true)$'\n'
-    done
-    [[ ${SINGLE:-no} == yes ]] && out=$(sed "s/^\(tg:\/\/proxy?\)\(.*\)port=${MTPROTO_INNER:-10445}/\1\2port=443/" <<<"$out")
-    echo; grep . <<<"$out" || echo "Отдельных ссылок нет."
-  fi
+  sid=$(jq -r '.subId' <<<"$c")
+  show_link "$name" "$sid"
+  # В режиме «только на сервере» показ уже содержит все ссылки.
+  if [[ $all == --all ]] && ! local_only_sub; then direct_links "$sid" '^(vpn|tg)://'; fi
 }
 
 cmd_list() {
