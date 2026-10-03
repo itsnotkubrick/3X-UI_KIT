@@ -86,7 +86,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main
 ```bash
 kit user add имя [--gb 50] [--days 30] [--devices 3]   # добавить пользователя во все протоколы, показать подписку и QR
 kit user list                                          # кто сколько израсходовал, до какого числа, когда был в сети
-kit user link имя [--all]                              # показать подписку снова; --all добавляет ссылки vpn:// и tg://
+kit user link имя                                      # показать подписку снова
+kit user link имя --amnezia                            # ссылка vpn:// для приложения AmneziaVPN
+kit user link имя --telegram                           # ссылка tg:// для Telegram и QR-код
 kit user limit имя [--gb N] [--days N] [--devices N]   # изменить лимиты (0 – без ограничений)
 kit user off имя                                       # временно выключить пользователя
 kit user on имя                                        # включить обратно

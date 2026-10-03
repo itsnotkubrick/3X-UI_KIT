@@ -105,8 +105,8 @@ human() { # байты → «1.2 ГБ»
 sub_url() { echo "${SUB_BASE}$1"; }
 
 # Отдельные ссылки на протоколы – прямо из подписки 3X-UI внутри сервера (мимо kit-sub, который
-# прячет от VPN-приложений vpn:// и tg://). direct_links subId фильтр
-direct_links() {
+# прячет от VPN-приложений vpn:// и tg://). collect_links subId фильтр – печатает подходящие строки.
+collect_links() {
   local sid=$1 filter=$2 raw out="" suffix scheme
   for suffix in "" -awg; do
     raw=""
@@ -119,7 +119,14 @@ direct_links() {
     out+=$(grep -E "$filter" <<<"$raw" || true)$'\n'
   done
   [[ ${SINGLE:-no} == yes ]] && out=$(sed "s/^\(tg:\/\/proxy?\)\(.*\)port=${MTPROTO_INNER:-10445}/\1\2port=443/" <<<"$out")
-  echo; grep . <<<"$out" || echo "Отдельных ссылок нет."
+  grep . <<<"$out" || true
+}
+
+direct_links() { # subId фильтр
+  local out
+  out=$(collect_links "$1" "$2")
+  echo
+  if [[ -n $out ]]; then echo "$out"; else echo "Отдельных ссылок нет."; fi
 }
 
 # Панель «через SSH-туннель»: подписка слушает только 127.0.0.1, с телефона по ней не зайти.
@@ -141,7 +148,7 @@ show_link() { # имя subId
   echo "$url"
   echo
   command -v qrencode >/dev/null && qrencode -t ANSIUTF8 -m 1 "$url"
-  echo "${D}AmneziaVPN и Telegram: kit user link $1 --all – отдельные ссылки vpn:// и tg://${N}"
+  echo "${D}AmneziaVPN: kit user link $1 --amnezia · Telegram: kit user link $1 --telegram${N}"
 }
 
 cmd_add() {
@@ -175,13 +182,35 @@ cmd_add() {
 }
 
 cmd_link() {
-  local name=${1:-} all=${2:-} c sid
+  local name=${1:-} flag=${2:-} c sid out
   valid_name "$name"
   c=$(client "$name"); [[ -n $c ]] || die "Нет пользователя $name"
   sid=$(jq -r '.subId' <<<"$c")
-  show_link "$name" "$sid"
-  # В режиме «только на сервере» показ уже содержит все ссылки.
-  if [[ $all == --all ]] && ! local_only_sub; then direct_links "$sid" '^(vpn|tg)://'; fi
+  case $flag in
+    --amnezia)
+      out=$(collect_links "$sid" '^vpn://')
+      [[ -n $out ]] || die "Ссылок AmneziaVPN нет: AmneziaWG на этом сервере не установлен."
+      echo
+      echo "AmneziaVPN: в приложении «Добавить подключение», вставьте ссылку целиком."
+      echo "Первая – классический AmneziaWG, вторая (если есть) – версия 3.1."
+      echo
+      echo "$out" ;;
+    --telegram)
+      out=$(collect_links "$sid" '^tg://')
+      [[ -n $out ]] || die "Ссылки для Telegram нет: MTProto на этом сервере не установлен."
+      echo
+      echo "Telegram: откройте ссылку на телефоне или наведите камеру на QR-код, Telegram предложит добавить прокси."
+      echo
+      echo "$out"
+      echo
+      command -v qrencode >/dev/null && qrencode -t ANSIUTF8 -m 1 "$(head -1 <<<"$out")"
+      return 0 ;;
+    "" | --all)
+      show_link "$name" "$sid"
+      # В режиме «только на сервере» показ уже содержит все ссылки.
+      if [[ $flag == --all ]] && ! local_only_sub; then direct_links "$sid" '^(vpn|tg)://'; fi ;;
+    *) die "kit user link имя [--all | --amnezia | --telegram]" ;;
+  esac
 }
 
 cmd_list() {
@@ -687,6 +716,14 @@ check_exposure() {
   ((bad)) || c_ok "файлы с паролями и ключами доступны только root"
 }
 
+# Ответ подписки похож на подписку: для Clash есть proxies, для остальных – ссылки (текстом или в base64).
+sub_body_ok() { # файл приложение
+  case $2 in
+    clash*) grep -q '^proxies:' "$1" ;;
+    *) grep -q '://' "$1" || base64 -d "$1" 2>/dev/null | grep -q '://' ;;
+  esac
+}
+
 check_subscription() {
   local cfg=/etc/kit-sub/config.json port path scheme=http sid ua code size body up sub_cert
   [[ -f $cfg ]] || { c_info "подписка не установлена (режим без сертификата: используйте отдельные ссылки из /root/3x-ui.txt)"; return 0; }
@@ -706,12 +743,16 @@ check_subscription() {
     : >"$body"
     code=$(curl -sgk -m 10 -A "$ua" -o "$body" -w '%{http_code}' "$scheme://127.0.0.1:$port$path$sid" 2>/dev/null || true)
     size=$(wc -c <"$body" | tr -d ' ')
-    if [[ $code == 200 && ${size:-0} -gt 0 ]]; then c_ok "подписка отвечает для $ua ($size байт)"; else c_bad svc:kit-sub "подписка для $ua: HTTP ${code:-нет ответа}"; fi
+    if [[ $code == 200 && ${size:-0} -gt 0 ]] && sub_body_ok "$body" "$ua"; then c_ok "подписка отвечает для $ua ($size байт)"
+    elif [[ $code == 200 ]]; then c_bad svc:kit-sub "подписка для $ua: ответ 200, но в нём нет ссылок на подключения"
+    else c_bad svc:kit-sub "подписка для $ua: HTTP ${code:-нет ответа}"; fi
   done
   rm -f "$body"
   if [[ ${SINGLE:-no} == yes ]]; then
-    code=$(curl -sk -m 10 -A "Happ/1.0" -o /dev/null -w '%{http_code}' "https://127.0.0.1$path$sid" 2>/dev/null || true)
-    if [[ $code == 200 ]]; then c_ok "подписка отвечает и через nginx (443)"; else c_bad svc:nginx "подписка через nginx: HTTP ${code:-нет ответа} (ищите причину выше)"; fi
+    body=$(mktemp)
+    code=$(curl -sk -m 10 -A "Happ/1.0" -o "$body" -w '%{http_code}' "https://127.0.0.1$path$sid" 2>/dev/null || true)
+    if [[ $code == 200 ]] && sub_body_ok "$body" "Happ/1.0"; then c_ok "подписка отвечает и через nginx (443)"; else c_bad svc:nginx "подписка через nginx: HTTP ${code:-нет ответа} или ответ без ссылок (ищите причину выше)"; fi
+    rm -f "$body"
   fi
 }
 
@@ -788,8 +829,34 @@ fix_action() { # код
       if nginx -t >/dev/null 2>&1; then say "Перечитываю сертификат в nginx"; systemctl reload nginx
       else warn "Конфиг nginx не проходит проверку – сертификат не перечитываю."; fi
       warn "Если сертификат всё ещё просрочен, запустите продление: ~/.acme.sh/acme.sh --cron" ;;
-    ntp) say "Включаю синхронизацию времени"; timedatectl set-ntp true ;;
+    ntp) fix_ntp ;;
   esac
+}
+
+# На минимальном Debian 13 нет клиента NTP, и «timedatectl set-ntp» отвечает «NTP not supported».
+# Ставим systemd-timesyncd, но только если нет другого.
+fix_ntp() {
+  say "Включаю синхронизацию времени"
+  timedatectl set-ntp true 2>/dev/null && return 0
+  if other_ntp_installed; then
+    warn "Время синхронизирует другой NTP-клиент (chrony или ntp) – проверьте, что его служба запущена."
+    return 0
+  fi
+  say "Ставлю systemd-timesyncd"
+  # timedatectl после установки ещё не видит новую службу, поэтому включаем её напрямую.
+  if DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq systemd-timesyncd >/dev/null 2>&1 \
+      && systemctl enable --now systemd-timesyncd >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "Не удалось включить синхронизацию времени. Поставьте клиент вручную: apt install systemd-timesyncd"
+}
+
+other_ntp_installed() {
+  local p
+  for p in chrony ntp ntpsec openntpd; do
+    [[ $(dpkg-query -W -f='${Status}' "$p" 2>/dev/null) == "install ok installed" ]] && return 0
+  done
+  return 1
 }
 
 # Что чинить сейчас: если найдена причина (TLS у подписки), перезапуски kit-sub и nginx – лишь
@@ -882,7 +949,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
 Пользователи (один пользователь сразу на всех протоколах):
   kit user add имя [--gb 50] [--days 30] [--devices 3]   добавить и показать подписку
   kit user list                                           трафик, срок, статус
-  kit user link имя [--all]                               подписка и QR; --all – ещё vpn:// и tg://
+  kit user link имя [--all|--amnezia|--telegram]          подписка и QR; --all, --amnezia, --telegram – отдельные ссылки
   kit user limit имя [--gb N] [--days N] [--devices N]    изменить лимиты (0 – без ограничений)
   kit user off имя  /  kit user on имя                    выключить и включить
   kit user del имя                                        удалить
