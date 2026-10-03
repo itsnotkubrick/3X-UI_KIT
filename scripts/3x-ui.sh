@@ -28,9 +28,9 @@ wait_apt_idle() {
   return 0
 }
 
-XUI_VERSION="v3.8.5"
+XUI_VERSION="v3.9.0"
 # SHA256 установщика 3X-UI этой версии: тег могут передвинуть, а хеш – нет (проверено 2026-09-30).
-XUI_INSTALL_SHA256="4e3fe7fe00ef8e904ce6a0e9c36fd8a0c7179fe5e786f23e31801aee84c6347d"
+XUI_INSTALL_SHA256="18616fe26c8f6c92db6daa2dcd7cd53c5143ee69ecfd26d8ea6dc9b2c78607a6"
 KIT_VERSION="1.1.2"
 # kit и kit-sub берём из того же релиза, что и этот скрипт, а не из меняющейся ветки main.
 KIT_RAW="https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/v$KIT_VERSION"
@@ -663,7 +663,9 @@ set_xray_core() {
   cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
   if [[ $cur_core != "$XRAY_CORE" ]]; then
     say "Ставлю ядро Xray $XRAY_CORE (совместимо с Hiddify, Mihomo и другими клиентами)"
-    api POST "server/installXray/$XRAY_CORE" '{}' >/dev/null
+    # 3X-UI 3.9 бывает отвечает ошибкой «GitHub API error», хотя ядро уже заменено: ответ не считаем
+    # проверкой, смотрим на версию ядра ниже.
+    (api POST "server/installXray/$XRAY_CORE" '{}' >/dev/null) 2>/dev/null || warn "Панель не подтвердила смену ядра – проверяю версию сам."
     for _ in $(seq 1 30); do
       cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
       [[ $cur_core == "$XRAY_CORE" ]] && break
