@@ -47,6 +47,22 @@ for a in 64 arm64-v8a; do
 done
 ok "Суммы архивов ядра Xray $xc совпадают с официальными"
 
+# Проверенная панель и ядро в kit.sh (kit panel update, kit check): те же версии, что в установщике,
+# а суммы архива панели и скрипта меню x-ui – официальные.
+kp=$(sed -n 's/^XUI_PIN="\(.*\)"/\1/p' scripts/kit.sh)
+[[ $kp == "$xv" ]] || die "XUI_PIN в kit.sh ($kp) не совпадает с XUI_VERSION в 3x-ui.sh ($xv)."
+kx=$(sed -n 's/^XRAY_PIN="\(.*\)"/\1/p' scripts/kit.sh)
+[[ $kx == "$xc" ]] || die "XRAY_PIN в kit.sh ($kx) не совпадает с XRAY_CORE в 3x-ui.sh ($xc)."
+for a in amd64 arm64; do
+  pin=$(sed -n "s/^  \[$a\]=\([0-9a-f]\{64\}\)\$/\1/p" scripts/kit.sh)
+  off=$(curl -fsSL "https://github.com/MHSanaei/3x-ui/releases/download/$kp/x-ui-linux-$a.tar.gz.sha256" | awk 'NR == 1 {print $1}')
+  [[ -n $pin && $pin == "$off" ]] || die "Сумма архива панели $kp ($a) в kit.sh не совпадает с официальной: «$pin» вместо «$off»."
+done
+shs=$(sed -n 's/^XUI_SH_SHA256=\(.*\)/\1/p' scripts/kit.sh)
+got=$(curl -fsSL "https://raw.githubusercontent.com/MHSanaei/3x-ui/$kp/x-ui.sh" | sha | awk '{print $1}')
+[[ $shs == "$got" ]] || die "Сумма x-ui.sh $kp в kit.sh не совпадает с официальной: «$shs» вместо «$got»."
+ok "Панель $kp и ядро $kx в kit.sh совпадают с установщиком и официальными суммами"
+
 # Открытые ключи из kit и hy2 – одинаковые, и среди них есть ключ, которым подписываем.
 signers() { awk '/^KIT_SIGNERS=\(/ {on = 1; next} on && /^\)/ {exit} on && /^ *"/ {gsub(/^ *"|"$/, ""); print}' "$1"; }
 [[ -n $(signers scripts/kit.sh) ]] || die "В scripts/kit.sh пустой KIT_SIGNERS: впишите туда открытую часть ключа ($key.pub)."

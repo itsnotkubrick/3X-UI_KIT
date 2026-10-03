@@ -21,6 +21,16 @@ XUI_ENV=/etc/x-ui/install-result.env
 KIT_ENV=/etc/kit/kit.env
 KIT_LATEST=/etc/kit/latest-version
 
+# Проверенные версии: kit panel update ставит именно их, kit check предупреждает о других.
+# Суммы архива панели и x-ui.sh сверяет tools/release.sh с официальными (перед каждым выпуском).
+XUI_PIN="v3.9.0"
+XRAY_PIN="v26.6.27"
+declare -A XUI_TARBALL_SHA256=(
+  [amd64]=d7cbe0bf6358ee0d2117c24fd2efb483502e411d38e2ea59bd0bf5e7a3e39390
+  [arm64]=9a2e43c976a2e71618a30d8f38b52476b25ed363c6989599e2f625cc52f51a81
+)
+XUI_SH_SHA256=d28959cb5da86c8ddaf2199e5c32dd1ea5dc0a87fcc53f900dd39b133070898a
+
 if [[ -t 1 ]]; then
   G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; B=$'\e[1m'; D=$'\e[2m'; N=$'\e[0m'
 else
@@ -667,10 +677,16 @@ check_services() {
 }
 
 check_versions() {
-  local xv; xv=$(xray_version || true)
-  c_info "kit $KIT_VERSION, панель 3X-UI $(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 || echo '?'), ядро Xray ${xv:-?}"
-  if [[ -n $xv ]] && newer "$xv" v26.6.27; then
-    c_warn "ядро Xray $xv новее проверенного (26.6.27): клиенты на Mihomo и sing-box могут не подключаться к REALITY"
+  local xv pv; xv=$(xray_version || true); pv=$(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 || true)
+  c_info "kit $KIT_VERSION, панель 3X-UI ${pv:-?}, ядро Xray ${xv:-?}"
+  if [[ -n $xv ]] && newer "$xv" "$XRAY_PIN"; then
+    c_warn "ядро Xray $xv новее проверенного (${XRAY_PIN#v}): клиенты на Mihomo и sing-box могут не подключаться к REALITY (kit fix вернёт проверенное)"
+    CHECK_FIX+=(core)
+  fi
+  if [[ -n $pv ]] && newer "v${pv#v}" "$XUI_PIN"; then
+    c_warn "панель 3X-UI $pv новее проверенной (${XUI_PIN#v}): часть команд kit может работать иначе"
+  elif [[ -n $pv && v${pv#v} != "$XUI_PIN" ]]; then
+    c_info "панель 3X-UI $pv, проверена ${XUI_PIN#v}: обновить можно командой kit panel update"
   fi
   if [[ -s $KIT_LATEST ]] && newer "$(cat "$KIT_LATEST")" "$KIT_VERSION"; then
     c_info "вышла версия $(cat "$KIT_LATEST"): kit update"
@@ -819,6 +835,7 @@ fix_action() { # код
       systemctl restart x-ui; sleep 4 ;;
     timer) say "Включаю автообновление"; auto_on ;;
     limit) say "Включаю проверку общего лимита трафика"; limit_timer_on ;;
+    core) say "Возвращаю проверенное ядро Xray ${XRAY_PIN#v}"; pin_core || true ;;
     perms)
       say "Возвращаю права 600 на файлы с паролями и ключами"
       local f
@@ -904,6 +921,126 @@ cmd_fix() {
 BACKUP_PATHS=(/etc/x-ui/install-result.env /etc/kit/kit.env /etc/kit-sub/config.json
   /etc/nginx/kit-stream.conf /etc/nginx/conf.d/kit.conf /var/www/kit /root/cert/self /root/cert/custom /root/3x-ui.txt)
 
+# Вернуть проверенное ядро Xray (панель 3.9 иногда отвечает ошибкой GitHub API, хотя ядро заменено, поэтому смотрим на версию).
+pin_core() {
+  local cur="" i
+  (api POST "server/installXray/$XRAY_PIN" '{}' >/dev/null) 2>/dev/null || true
+  for i in $(seq 1 30); do
+    cur=$(xray_version || true)
+    [[ $cur == "$XRAY_PIN" ]] && return 0
+    sleep 2
+  done
+  warn "Не удалось вернуть ядро Xray $XRAY_PIN (сейчас ${cur:-?})."
+  return 1
+}
+
+panel_healthy() { # ждём ответа панели до 60 секунд
+  local i
+  for i in $(seq 1 30); do
+    curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $XUI_API_TOKEN" "$API/server/getNewUUID" 2>/dev/null && return 0
+    sleep 2
+  done
+  return 1
+}
+
+# Обновление панели до проверенной версии. Делает только безопасную часть официального обновления:
+# проверенный архив, замена файлов панели, миграция базы. Не трогает ядро Xray, сертификаты и настройки
+# (официальный update.sh при отсутствии сертификата сам выпускает его и включает TLS, меняет ядро и ставит fail2ban).
+panel_update() {
+  local force=no a arch cur target=${XUI_PIN#v} tmp ts bak got want os_id keep_core
+  for a in "$@"; do
+    case $a in
+      --force) force=yes ;;
+      *) die "kit panel update [--force]" ;;
+    esac
+  done
+  case "$(uname -m)" in x86_64 | amd64) arch=amd64 ;; aarch64 | arm64) arch=arm64 ;; *) die "Обновление панели умеет только amd64 и arm64." ;; esac
+  cur=$(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 || true)
+  [[ -n $cur ]] || die "Не удалось узнать версию панели."
+  cur=${cur#v}
+  if [[ $cur == "$target" && $force == no ]]; then
+    say "Панель уже $target: это проверенная версия."
+    return 0
+  fi
+  if newer "v$cur" "$XUI_PIN" && [[ $force == no ]]; then
+    die "У вас панель $cur новее проверенной $target. Откат не поддерживается; если что-то не работает, пришлите вывод kit check."
+  fi
+  say "Обновляю панель 3X-UI $cur → $target (настройки, пользователи и ядро Xray сохраняются)"
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064 # путь подставляем сразу
+  trap "rm -rf -- '$tmp'" EXIT
+
+  # 1. Архив и скрипт меню – только с совпавшей зашитой суммой.
+  curl -fL --retry 3 -m 600 -o "$tmp/x-ui.tar.gz" "https://github.com/MHSanaei/3x-ui/releases/download/$XUI_PIN/x-ui-linux-$arch.tar.gz" 2>/dev/null \
+    || die "Не удалось скачать панель с GitHub. Сервер не тронут."
+  got=$(sha256sum "$tmp/x-ui.tar.gz" | awk '{print $1}'); want=${XUI_TARBALL_SHA256[$arch]}
+  [[ $got == "$want" ]] || die "Архив панели не совпал с проверенным (SHA256) – не ставлю. Сервер не тронут."
+  curl -fsSL --retry 3 -m 60 -o "$tmp/x-ui.sh" "https://raw.githubusercontent.com/MHSanaei/3x-ui/$XUI_PIN/x-ui.sh" \
+    || die "Не удалось скачать x-ui.sh. Сервер не тронут."
+  [[ $(sha256sum "$tmp/x-ui.sh" | awk '{print $1}') == "$XUI_SH_SHA256" ]] || die "Скрипт меню x-ui не совпал с проверенным (SHA256) – не ставлю. Сервер не тронут."
+  tar tzf "$tmp/x-ui.tar.gz" | grep -qE '^/|(^|/)\.\.(/|$)' && die "В архиве панели странные пути – не ставлю."
+  tar xzf "$tmp/x-ui.tar.gz" -C "$tmp"
+  [[ -s $tmp/x-ui/x-ui ]] || die "В архиве панели нет x-ui. Сервер не тронут."
+
+  # 2. Копия на случай отката (база снимается средствами SQLite).
+  ts=$(date +%Y%m%d-%H%M); bak=/root/x-ui-before-update-$ts
+  install -d -m 700 "$bak/etc-x-ui"
+  cp -a /usr/local/x-ui "$bak/usr-local-x-ui"
+  cp -a /etc/x-ui/. "$bak/etc-x-ui/"
+  cp -a /etc/systemd/system/x-ui.service "$bak/x-ui.service" 2>/dev/null || true
+  cp -a /usr/bin/x-ui "$bak/x-ui.sh" 2>/dev/null || true
+  python3 - /etc/x-ui/x-ui.db "$bak/x-ui.db" <<'PY' || die "Не удалось сохранить копию базы. Сервер не тронут."
+import sqlite3, sys
+src = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+dst = sqlite3.connect(sys.argv[2]); src.backup(dst); dst.close(); src.close()
+PY
+  say "Копия прежней панели: $bak"
+
+  # 3. Замена файлов. Ядро Xray (проверенное) оставляем: берём его из прежней установки.
+  keep_core=$tmp/xray.keep
+  cp -a "/usr/local/x-ui/bin/xray-linux-$arch" "$keep_core"
+  systemctl stop x-ui
+  pkill -f 'mtg-linux-[^ ]* run ' >/dev/null 2>&1 || true
+  install -m 755 "$tmp/x-ui/x-ui" /usr/local/x-ui/x-ui.new && mv -f /usr/local/x-ui/x-ui.new /usr/local/x-ui/x-ui
+  for f in "$tmp"/x-ui/bin/*; do
+    case ${f##*/} in xray-linux-*) continue ;; esac
+    cp -af "$f" /usr/local/x-ui/bin/
+  done
+  install -m 755 "$keep_core" "/usr/local/x-ui/bin/xray-linux-$arch"
+  chmod +x "/usr/local/x-ui/bin/mtg-linux-$arch" 2>/dev/null || true
+  rm -rf /usr/local/x-ui/bin/tuic-server /usr/local/x-ui/bin/tuic   # TUIC теперь встроен в панель
+  install -m 755 "$tmp/x-ui.sh" /usr/local/x-ui/x-ui.sh
+  install -m 755 "$tmp/x-ui.sh" /usr/bin/x-ui.new && mv -f /usr/bin/x-ui.new /usr/bin/x-ui
+  os_id=$(. /etc/os-release && echo "${ID:-}")
+  case $os_id in
+    ubuntu | debian) [[ -f $tmp/x-ui/x-ui.service.debian ]] && install -m 644 "$tmp/x-ui/x-ui.service.debian" /etc/systemd/system/x-ui.service ;;
+    *) warn "Файл службы не менял (система $os_id): оставил прежний." ;;
+  esac
+  chown -R root:root /usr/local/x-ui
+  [[ -f /usr/local/x-ui/bin/config.json ]] && chmod 640 /usr/local/x-ui/bin/config.json
+  systemctl daemon-reload
+  /usr/local/x-ui/x-ui migrate >/dev/null 2>&1 || true
+  systemctl enable x-ui >/dev/null 2>&1 || true
+  systemctl start x-ui
+
+  # 4. Проверка и откат при провале.
+  if panel_healthy && [[ $(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1) == "$target" ]]; then
+    systemctl is-active -q x-ui || true
+    say "Панель обновлена до $target, ядро Xray ${XRAY_PIN#v} осталось."
+    echo "Копию прежней панели можно удалить, когда убедитесь, что всё работает: rm -rf $bak"
+    echo "Проверить сервер: ${B}kit check${N}"
+    return 0
+  fi
+  warn "Панель после обновления не отвечает – возвращаю прежнюю."
+  systemctl stop x-ui || true
+  rm -rf /usr/local/x-ui && cp -a "$bak/usr-local-x-ui" /usr/local/x-ui
+  cp -a "$bak/etc-x-ui/." /etc/x-ui/
+  [[ -f $bak/x-ui.service ]] && cp -a "$bak/x-ui.service" /etc/systemd/system/x-ui.service
+  [[ -f $bak/x-ui.sh ]] && install -m 755 "$bak/x-ui.sh" /usr/bin/x-ui
+  systemctl daemon-reload; systemctl start x-ui || true
+  die "Обновление не удалось, прежняя панель восстановлена ($cur). Копия: $bak. Лог: journalctl -u x-ui -n 50"
+}
+
 cmd_backup() {
   local out tmp p ssl=none c
   out=/root/kit-backup-$(date +%Y%m%d-%H%M).tar.gz
@@ -953,6 +1090,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
   kit user limit имя [--gb N] [--days N] [--devices N]    изменить лимиты (0 – без ограничений)
   kit user off имя  /  kit user on имя                    выключить и включить
   kit user del имя                                        удалить
+  kit panel update [--force]                              обновить панель 3X-UI до проверенной версии (ядро и настройки сохраняются)
   kit user enforce [--dry-run]                            применить общий лимит сейчас (обычно само, раз в 5 минут)
 
 Сервер:
@@ -976,6 +1114,7 @@ case "$cmd_key" in
   "user on") cmd_toggle "${3:-}" true ;;
   "user del") shift 2; cmd_del "$@" ;;
   "user enforce") shift 2; cmd_enforce "$@" ;;
+  "panel update") shift 2; panel_update "$@" ;;
   "__limit-timer on") limit_timer_on ;;
   "update "*) shift; cmd_update "$@" ;;
   "backup "*) cmd_backup ;;
