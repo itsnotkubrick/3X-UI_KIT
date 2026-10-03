@@ -90,6 +90,7 @@ kit user link имя                                      # показать п�
 kit user link имя --amnezia                            # ссылка vpn:// для приложения AmneziaVPN
 kit user link имя --telegram                           # ссылка tg:// для Telegram и QR-код
 kit user limit имя [--gb N] [--days N] [--devices N]   # изменить лимиты (0 – без ограничений)
+kit user vision имя|--all [off]                      # включить xtls-rprx-vision для REALITY (у новых пользователей включён сам)
 kit user off имя                                       # временно выключить пользователя
 kit user on имя                                        # включить обратно
 kit user del имя                                       # удалить пользователя

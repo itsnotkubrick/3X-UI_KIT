@@ -985,7 +985,7 @@ ensure_user() {
   else
     SUBID=$(rand_str 16 | tr 'A-Z' 'a-z')
     api POST clients/add "$(jq -nc --arg e "$NAME" --arg s "$SUBID" --argjson ids "$ids" \
-      '{client: {email: $e, subId: $s, totalGB: 0, expiryTime: 0, limitIp: 0, enable: true, comment: "kit"}, inboundIds: $ids}')" >/dev/null
+      '{client: {email: $e, subId: $s, totalGB: 0, expiryTime: 0, limitIp: 0, enable: true, flow: "xtls-rprx-vision", comment: "kit"}, inboundIds: $ids}')" >/dev/null
     awg_attach "$NAME" "$SUBID"
   fi
 }

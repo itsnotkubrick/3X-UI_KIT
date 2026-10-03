@@ -184,7 +184,7 @@ cmd_add() {
   sid=$(rand_id)
   body=$(jq -nc --arg e "$name" --arg s "$sid" --argjson t "$(gb_bytes "$gb")" --argjson x "$(days_ms "$days")" \
     --argjson ip "$devices" --argjson ids "$ids" '{client: {email: $e, subId: $s, totalGB: $t, expiryTime: $x,
-    limitIp: $ip, enable: true, comment: "kit"}, inboundIds: $ids}')
+    limitIp: $ip, enable: true, flow: "xtls-rprx-vision", comment: "kit"}, inboundIds: $ids}')
   api POST clients/add "$body" >/dev/null
   awg_attach "$name" "$sid" "$(gb_bytes "$gb")" "$(days_ms "$days")" "$devices"
   say "Пользователь $name добавлен во все протоколы ($(api GET inbounds/list | jq length))$( ((gb)) && echo ", лимит $gb ГБ")$( ((days)) && echo ", на $days дн")."
@@ -354,6 +354,29 @@ UNIT
   systemctl enable --now kit-limit.timer >/dev/null 2>&1
 }
 limit_timer_enabled() { systemctl is-enabled -q kit-limit.timer 2>/dev/null; }
+
+# xtls-rprx-vision для REALITY. Панель сама ставит flow только там, где он допустим (REALITY по TCP), на XHTTP, WS и др. его нет.
+# Клиент без Vision не подключится к серверу, где у пользователя Vision включён, поэтому у существующих пользователей
+# включаем только по команде: ссылки в подписке обновятся сами, а вручную сохранённые ссылки на REALITY придётся заменить.
+cmd_vision() { # имя|--all [off]
+  local target=${1:-} flow="xtls-rprx-vision" e rec body n=0
+  [[ -n $target ]] || die "kit user vision имя|--all [off]"
+  [[ ${2:-} == off ]] && flow=""
+  if [[ $target == --all ]]; then
+    mapfile -t _emails < <(clients | jq -r '.[] | select(.email | test("-awg[0-9]*$") | not) | .email')
+  else
+    valid_name "$target"; [[ -n $(client "$target") ]] || die "Нет пользователя $target"
+    _emails=("$target")
+  fi
+  for e in "${_emails[@]}"; do
+    rec=$(client "$e")
+    body=$(jq -c --arg f "$flow" '{email, subId, totalGB, expiryTime, limitIp, enable, comment} + {flow: $f}' <<<"$rec")
+    api POST "clients/update/$e" "$body" >/dev/null
+    n=$((n + 1))
+  done
+  if [[ -n $flow ]]; then say "Vision включён у $n польз.: ссылка REALITY в подписке теперь с flow=xtls-rprx-vision (приложения подхватят при обновлении подписки)."
+  else say "Vision выключен у $n польз."; fi
+}
 
 cmd_toggle() { # имя true|false
   valid_name "$1"
@@ -672,6 +695,9 @@ check_services() {
   if auto_enabled; then c_ok "автообновление включено"
   elif [[ -f $KIT_MANUAL ]]; then c_info "автообновление выключено вами (включить: kit update --auto)"
   else c_bad timer "автообновление не включено"; fi
+  local novis
+  novis=$(api GET inbounds/list 2>/dev/null | jq -r '[.[] | select(.remark == "REALITY") | (.settings | if type == "string" then fromjson else . end).clients[]? | select((.flow // "") == "")] | length' 2>/dev/null || echo 0)
+  if [[ ${novis:-0} =~ ^[0-9]+$ ]] && ((novis > 0)); then c_info "у $novis польз. в REALITY не включён xtls-rprx-vision (включить: kit user vision имя|--all)"; fi
   if limit_timer_enabled; then c_ok "проверка общего лимита трафика включена"
   else c_bad limit "проверка общего лимита трафика не включена (лимит у AmneziaWG считался бы отдельно)"; fi
 }
@@ -1091,6 +1117,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
   kit user off имя  /  kit user on имя                    выключить и включить
   kit user del имя                                        удалить
   kit panel update [--force]                              обновить панель 3X-UI до проверенной версии (ядро и настройки сохраняются)
+  kit user vision имя|--all [off]                         включить xtls-rprx-vision для REALITY (у новых пользователей включён сам)
   kit user enforce [--dry-run]                            применить общий лимит сейчас (обычно само, раз в 5 минут)
 
 Сервер:
@@ -1114,6 +1141,7 @@ case "$cmd_key" in
   "user on") cmd_toggle "${3:-}" true ;;
   "user del") shift 2; cmd_del "$@" ;;
   "user enforce") shift 2; cmd_enforce "$@" ;;
+  "user vision") shift 2; cmd_vision "$@" ;;
   "panel update") shift 2; panel_update "$@" ;;
   "__limit-timer on") limit_timer_on ;;
   "update "*) shift; cmd_update "$@" ;;
