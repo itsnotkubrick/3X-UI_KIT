@@ -232,8 +232,89 @@ cmd_limit() {
     esac
   done
   update_user "$name" "$f" --argjson gb "${gb:-0}" --argjson days "${days:-0}" --argjson dev "${dev:-0}"
+  cmd_enforce --quiet
   say "Лимиты $name обновлены (0 – без ограничений)."
 }
+
+# Общий лимит трафика. У пользователя несколько записей в панели (основная и «двойник» AmneziaWG),
+# и панель считает трафик каждой записи отдельно. Раз в 5 минут складываем трафик всех записей и,
+# если сумма дошла до лимита основной записи, отключаем их все. Когда счётчики сброшены, лимит
+# поднят или трафик ушёл ниже лимита, включаем обратно только те записи, которые отключили сами
+# (в комментарии записи «kit:limit»), чтобы не перебить ваше ручное «kit user off».
+cmd_enforce() {
+  local dry=no quiet=no a list plan line e act used lim rec body
+  for a in "$@"; do
+    case $a in
+      --dry-run) dry=yes ;;
+      --quiet) quiet=yes ;;
+      *) die "kit user enforce [--dry-run]" ;;
+    esac
+  done
+  list=$(clients)
+  plan=$(jq -c --argjson now "$(($(date +%s) * 1000))" '
+    map(select((.subId // "") != ""))
+    | group_by(.subId | sub("-awg[0-9]*$"; ""))
+    | .[]
+    | (sort_by(.email | length)) as $g
+    | ($g[0].totalGB // 0) as $lim
+    | ([$g[] | (.traffic.up // 0) + (.traffic.down // 0)] | add) as $used
+    | $g[]
+    | if $lim > 0 and $used >= $lim and .enable == true then {email, act: "off", used: $used, lim: $lim}
+      elif ($lim == 0 or $used < $lim) and .enable == false and .comment == "kit:limit"
+           and ((.expiryTime // 0) == 0 or .expiryTime > $now) then {email, act: "on", used: $used, lim: $lim}
+      else empty end' <<<"$list")
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    e=$(jq -r '.email' <<<"$line"); act=$(jq -r '.act' <<<"$line")
+    used=$(jq -r '.used' <<<"$line"); lim=$(jq -r '.lim' <<<"$line")
+    if [[ $dry == yes ]]; then
+      echo "$e: $([[ $act == off ]] && echo отключить || echo включить) (трафик $(human "$used") из $(human "$lim"))"
+      continue
+    fi
+    rec=$(jq -c --arg e "$e" 'map(select(.email == $e))[0]' <<<"$list")
+    if [[ $act == off ]]; then
+      body=$(jq -c '{email, subId, totalGB, expiryTime, limitIp, enable, comment} | .enable = false | .comment = "kit:limit"' <<<"$rec")
+    else
+      body=$(jq -c '{email, subId, totalGB, expiryTime, limitIp, enable, comment} | .enable = true | .comment = "kit"' <<<"$rec")
+    fi
+    api POST "clients/update/$e" "$body" >/dev/null
+    if [[ $quiet == no || $act == off ]]; then
+      if [[ $act == off ]]; then echo "$e: отключён, общий лимит исчерпан ($(human "$used") из $(human "$lim"))"
+      elif ((lim == 0)); then echo "$e: включён обратно, лимит снят"
+      else echo "$e: включён обратно, трафик ниже лимита ($(human "$used") из $(human "$lim"))"; fi
+    fi
+  done <<<"$plan"
+  return 0
+}
+
+# Проверка общего лимита раз в 5 минут (systemd-таймер).
+limit_timer_on() {
+  cat >/etc/systemd/system/kit-limit.service <<'UNIT'
+[Unit]
+Description=3X-UI KIT: общий лимит трафика пользователей (сумма по всем записям)
+After=x-ui.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kit user enforce --quiet
+TimeoutStartSec=120
+UNIT
+  cat >/etc/systemd/system/kit-limit.timer <<'UNIT'
+[Unit]
+Description=3X-UI KIT: проверка общего лимита трафика раз в 5 минут
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now kit-limit.timer >/dev/null 2>&1
+}
+limit_timer_enabled() { systemctl is-enabled -q kit-limit.timer 2>/dev/null; }
 
 cmd_toggle() { # имя true|false
   valid_name "$1"
@@ -394,6 +475,7 @@ needs_migration() {
   [[ -f /etc/cron.d/kit-xui-menu ]] && return 0
   [[ -f /etc/systemd/system/kit-sub.service ]] && ! grep -q '^DynamicUser=yes' /etc/systemd/system/kit-sub.service && return 0
   [[ ! -f $KIT_MANUAL ]] && ! auto_enabled && return 0
+  limit_timer_enabled || return 0
   return 1
 }
 
@@ -506,6 +588,9 @@ cmd_update() {
   # Автообновление включено по умолчанию, пока его не выключили командой kit update --manual.
   [[ -f $KIT_MANUAL ]] || auto_enabled || { auto_on; say "Включил автообновление: kit update --manual, чтобы выключить"; }
 
+  # Общий лимит трафика: проверка раз в 5 минут (с 1.2).
+  limit_timer_enabled || { limit_timer_on; say "Включил проверку общего лимита трафика (раз в 5 минут)"; }
+
   # Через rename: bash дочитывает текущий kit по ходу работы, его файл трогать нельзя.
   install -m 755 "$tmp/kit.sh" /usr/local/bin/kit.new && mv -f /usr/local/bin/kit.new /usr/local/bin/kit
   echo
@@ -548,6 +633,8 @@ check_services() {
   if auto_enabled; then c_ok "автообновление включено"
   elif [[ -f $KIT_MANUAL ]]; then c_info "автообновление выключено вами (включить: kit update --auto)"
   else c_bad timer "автообновление не включено"; fi
+  if limit_timer_enabled; then c_ok "проверка общего лимита трафика включена"
+  else c_bad limit "проверка общего лимита трафика не включена (лимит у AmneziaWG считался бы отдельно)"; fi
 }
 
 check_versions() {
@@ -690,6 +777,7 @@ fix_action() { # код
       api POST setting/update "$upd" >/dev/null
       systemctl restart x-ui; sleep 4 ;;
     timer) say "Включаю автообновление"; auto_on ;;
+    limit) say "Включаю проверку общего лимита трафика"; limit_timer_on ;;
     perms)
       say "Возвращаю права 600 на файлы с паролями и ключами"
       local f
@@ -798,6 +886,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
   kit user limit имя [--gb N] [--days N] [--devices N]    изменить лимиты (0 – без ограничений)
   kit user off имя  /  kit user on имя                    выключить и включить
   kit user del имя                                        удалить
+  kit user enforce [--dry-run]                            применить общий лимит сейчас (обычно само, раз в 5 минут)
 
 Сервер:
   kit update            обновить kit и подписку kit-sub сейчас (пользователи и ссылки не меняются)
@@ -819,6 +908,8 @@ case "$cmd_key" in
   "user off") cmd_toggle "${3:-}" false ;;
   "user on") cmd_toggle "${3:-}" true ;;
   "user del") shift 2; cmd_del "$@" ;;
+  "user enforce") shift 2; cmd_enforce "$@" ;;
+  "__limit-timer on") limit_timer_on ;;
   "update "*) shift; cmd_update "$@" ;;
   "backup "*) cmd_backup ;;
   "check "*) cmd_check ;;

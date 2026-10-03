@@ -511,6 +511,8 @@ main() {
   brand_xui_menu
   # Автообновление kit и kit-sub: только подписанные релизы, выключается kit update --manual.
   /usr/local/bin/kit update --auto >/dev/null 2>&1 || warn "Автообновление не включилось – включите позже: kit update --auto"
+  # Общий лимит трафика: у пользователя несколько записей (AmneziaWG считается отдельно), раз в 5 минут их трафик складывается.
+  /usr/local/bin/kit __limit-timer on >/dev/null 2>&1 || warn "Проверка общего лимита трафика не включилась – включите позже: kit fix"
 
   # --- файрвол ---
   if [[ $UFW == yes ]]; then
