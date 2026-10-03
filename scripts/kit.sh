@@ -666,8 +666,34 @@ fix_action() { # код
       if nginx -t >/dev/null 2>&1; then say "Перечитываю сертификат в nginx"; systemctl reload nginx
       else warn "Конфиг nginx не проходит проверку – сертификат не перечитываю."; fi
       warn "Если сертификат всё ещё просрочен, запустите продление: ~/.acme.sh/acme.sh --cron" ;;
-    ntp) say "Включаю синхронизацию времени"; timedatectl set-ntp true ;;
+    ntp) fix_ntp ;;
   esac
+}
+
+# На минимальном Debian 13 нет клиента NTP, и «timedatectl set-ntp» отвечает «NTP not supported».
+# Ставим  systemd-timesyncd, но только если нет другого.
+fix_ntp() {
+  say "Включаю синхронизацию времени"
+  timedatectl set-ntp true 2>/dev/null && return
+  if other_ntp_installed; then
+    warn "Время синхронизирует другой NTP-клиент (chrony или ntp) – проверьте, что его служба запущена."
+    return
+  fi
+  say "Ставлю systemd-timesyncd"
+  # timedatectl после установки ещё не видит новую службу, поэтому включаем её напрямую.
+  if DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq systemd-timesyncd >/dev/null 2>&1 \
+      && systemctl enable --now systemd-timesyncd >/dev/null 2>&1; then
+    return
+  fi
+  warn "Не удалось включить синхронизацию времени. Поставьте клиент вручную: apt install systemd-timesyncd"
+}
+
+other_ntp_installed() {
+  local p
+  for p in chrony ntp ntpsec openntpd; do
+    [[ $(dpkg-query -W -f='${Status}' "$p" 2>/dev/null) == "install ok installed" ]] && return 0
+  done
+  return 1
 }
 
 # Что чинить сейчас: если найдена причина (TLS у подписки), перезапуски kit-sub и nginx – лишь
