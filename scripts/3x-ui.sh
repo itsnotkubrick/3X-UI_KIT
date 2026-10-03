@@ -678,6 +678,7 @@ setup_tls_cert() {
     fi
     PIN=$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')
   fi
+  return 0
 }
 
 tls_json() { # alpn(JSON-массив)
