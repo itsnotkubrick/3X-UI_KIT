@@ -12,7 +12,7 @@
 set -Eeuo pipefail
 export LC_ALL=C.UTF-8  # ширина колонок по символам, а не байтам
 
-KIT_VERSION="1.1.2"
+KIT_VERSION="1.2"
 KIT_RAW="https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main"
 # Файлы новой версии берём из её тега, а не из меняющейся ветки main.
 kit_ref_raw() { echo "https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/v$1"; }
@@ -147,9 +147,10 @@ show_link() { # имя subId
   url=$(sub_url "$2")
   echo
   if local_only_sub; then
-    echo "Подписка ${B}$1${N} в этом режиме (панель через SSH-туннель) открывается только на самом сервере,"
-    echo "с телефона по ней не зайти. Подключайтесь отдельными ссылками на протоколы:"
-    direct_links "$2" '^[a-z0-9]+://'
+    echo "В режиме «панель через SSH-туннель» подписка открывается только на самом сервере,"
+    echo "поэтому подключайтесь ссылками на протоколы ниже."
+    echo
+    links_block "$1" "$2"
     return 0
   fi
   echo "Подписка ${B}$1${N} – все протоколы одной ссылкой. Вставьте в Happ, Hiddify, Karing,"
@@ -158,7 +159,7 @@ show_link() { # имя subId
   echo "$url"
   echo
   command -v qrencode >/dev/null && qrencode -t ANSIUTF8 -m 1 "$url"
-  echo "${D}AmneziaVPN: kit user link $1 --amnezia · Telegram: kit user link $1 --telegram${N}"
+  echo "${D}Отдельные ссылки на каждый протокол: kit user link $1 --all${N}"
 }
 
 cmd_add() {
@@ -218,7 +219,7 @@ cmd_link() {
     "" | --all)
       show_link "$name" "$sid"
       # В режиме «только на сервере» показ уже содержит все ссылки.
-      if [[ $flag == --all ]] && ! local_only_sub; then direct_links "$sid" '^(vpn|tg)://'; fi ;;
+      if [[ $flag == --all ]] && ! local_only_sub; then echo; links_block "$name" "$sid"; fi ;;
     *) die "kit user link имя [--all | --amnezia | --telegram]" ;;
   esac
 }
@@ -580,17 +581,19 @@ auto_off() {
 }
 
 cmd_update() {
-  local force="" unattended=no latest tmp
+  local force="" unattended=no latest tmp panel=no
   while [[ $# -gt 0 ]]; do
     case $1 in
       --force) force=yes ;;
+      --panel) panel=yes ;;
       --auto) auto_on; say "Автообновление включено: раз в сутки ночью, только подписанные релизы. Журнал: $KIT_UPDATE_LOG"; return ;;
       --manual) auto_off; say "Автообновление выключено. Обновляться вручную: kit update, включить снова: kit update --auto"; return ;;
       --unattended) unattended=yes ;;
-      *) die "Неизвестный параметр: $1 (kit update [--force | --auto | --manual])" ;;
+      *) die "Неизвестный параметр: $1 (kit update [--panel | --force | --auto | --manual])" ;;
     esac
     shift
   done
+  [[ $panel == no ]] || { panel_update ${force:+--force}; return; }
   # Ночной запуск и ручной не должны встретиться.
   exec 9>/run/kit-update.lock
   flock -n 9 || die "Обновление уже идёт."
@@ -892,8 +895,9 @@ deep_clients() {
 
 cmd_check() {
   local deep=no
+  [[ ${1:-} != --fix ]] || { shift; cmd_fix "$@"; return; }
   [[ ${1:-} != --deep ]] || deep=yes
-  [[ -z ${1:-} || $deep == yes ]] || die "Команда: kit check [--deep]"
+  [[ -z ${1:-} || $deep == yes ]] || die "Команда: kit check [--deep | --fix]"
   echo "${B}kit check${N} – проверка сервера (ничего не меняет)"
   echo
   run_checks
@@ -1456,37 +1460,416 @@ reality_add() { # [порт]
   echo "Проверить: ${B}kit check --deep${N}. Ссылки: ${B}kit user link имя --all${N}"
 }
 
+# ---------- вид: блок ссылок, kit net, меню ----------
+
+# Блок ссылок: основные и запасные по группам, у каждой название, порт и сама ссылка. Печатает и итог установки, и kit user link.
+links_block() { # имя subId
+  local name=$1 sid=$2 raw
+  raw=$(collect_links "$sid" '^[a-z0-9]+://')
+  [[ -n $raw ]] || { echo "Отдельных ссылок нет."; return 0; }
+  local script
+  IFS= read -r -d '' script <<'PY' || true
+import base64, json, re, subprocess, shutil, sys
+from urllib.parse import urlparse, parse_qs, unquote
+name = sys.argv[1]
+MAIN = ["REALITY", "XHTTP", "Hysteria2"]
+items, vpn = [], 0
+for line in sys.stdin.read().split():
+    sch = line.split("://", 1)[0]
+    label, port, net, hint = "", "", "tcp", ""
+    try:
+        if sch == "vmess":
+            d = json.loads(base64.b64decode(line[8:] + "=" * (-len(line[8:]) % 4)))
+            label, port = d.get("ps", "VMess"), str(d.get("port", ""))
+        elif sch == "vpn":
+            vpn += 1
+            label, net, hint = ("AmneziaWG" if vpn == 1 else "AmneziaWG 3.1"), "udp", "вставьте в AmneziaVPN"
+        elif sch == "tg":
+            label, port, hint = "MTProto", parse_qs(urlparse(line).query).get("port", [""])[0], "для Telegram"
+        else:
+            u = urlparse(line)
+            label, port = unquote(u.fragment), str(u.port or "")
+            if sch in ("hysteria2", "tuic"):
+                net = "udp"
+            if sch == "tuic":
+                hint = "если приложение ругается на сертификат, включите «Разрешить небезопасный»"
+    except Exception:
+        continue
+    label = re.sub(r"-" + re.escape(name) + r"$", "", label) or sch
+    items.append((label, port, net, hint, line))
+def show(label, port, net, hint, line):
+    where = (port + "/" + net) if port and sch_net_ok(label, net) else (port or net)
+    print("  %s  ·  %s%s" % (label, where, ("   → " + hint) if hint else ""))
+    print("  " + line)
+    print()
+def sch_net_ok(label, net):
+    return label not in ("Shadowsocks",)
+print("ПОДКЛЮЧЕНИЕ  ·  %s" % name)
+print()
+main = [i for m in MAIN for i in items if i[0] == m]
+ORDER = ["REALITY-2", "VLESS-WS", "Trojan-gRPC", "VMess-WS", "Shadowsocks", "TUIC", "AmneziaWG", "AmneziaWG 3.1", "MTProto"]
+spare = [i for i in items if i[0] not in MAIN]
+spare.sort(key=lambda i: ORDER.index(i[0]) if i[0] in ORDER else len(ORDER))
+qr_done = False
+for title, group in (("Основные", main), ("Запасные", spare)):
+    if not group:
+        continue
+    print(title)
+    for it in group:
+        show(*it)
+        if not qr_done and it[0] == "REALITY" and shutil.which("qrencode"):
+            sys.stdout.flush()
+            subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "1", it[4]])
+            print()
+            qr_done = True
+PY
+  python3 -c "$script" "$name" <<<"$raw"
+}
+
+# ---------- kit net: протоколы, порты, сайт маскировки, отпечаток ----------
+
+net_main_name() { case $1 in REALITY | XHTTP | Hysteria2) return 0 ;; *) return 1 ;; esac; }
+
+net_resolve() { # короткое имя → название подключения
+  case ${1,,} in
+    reality) echo REALITY ;; reality2 | reality-2) echo REALITY-2 ;; xhttp) echo XHTTP ;; hy2 | hysteria2 | hysteria) echo Hysteria2 ;;
+    ws | vless-ws) echo VLESS-WS ;; grpc | trojan | trojan-grpc) echo Trojan-gRPC ;; vmess | vmess-ws) echo VMess-WS ;;
+    ss | shadowsocks) echo Shadowsocks ;; tuic) echo TUIC ;; wg | wireguard) echo WireGuard ;;
+    awg | amneziawg) echo AmneziaWG ;; awg3 | amneziawg-3.1) echo AmneziaWG-3.1 ;; mtproto) echo MTProto ;;
+    *) echo "$1" ;;
+  esac
+}
+
+inbound_body_of() { # строка подключения (json) → тело для inbounds/update
+  jq -c '{id, remark, enable, listen, port, protocol, expiryTime, total,
+    settings: (.settings | if type == "string" then . else tojson end),
+    streamSettings: (.streamSettings | if type == "string" then . else tojson end),
+    sniffing: (.sniffing | if type == "string" then . else tojson end)}' <<<"$1"
+}
+
+inbound_patch() { # id фильтр-jq [аргументы jq...]: меняет подключение, ошибка – код возврата, не выход
+  local id=$1 filter=$2 row new
+  shift 2
+  row=$(api GET inbounds/list | jq -c --argjson id "$id" '.[] | select(.id == $id)')
+  [[ -n $row ]] || return 1
+  new=$(jq -c "$@" "$filter" <<<"$row") || return 1
+  (api POST "inbounds/update/$id" "$(inbound_body_of "$new")" >/dev/null) || return 1
+}
+
+net_show() {
+  local list name port proto listen en sni fp shown_reality2=no mark note group fpl=""
+  list=$(api GET inbounds/list)
+  printf '%s %s %s %s\n' "$(padr Протоколы 22)" "$(padr Порт 12)" "$(padr Статус 8)" "Заметка"
+  for group in main spare; do
+    if [[ $group == main ]]; then echo "Основные"; else echo "Запасные"; fi
+    while IFS='|' read -r name port proto listen en sni fp; do
+      [[ -n $name ]] || continue
+      if net_main_name "$name"; then [[ $group == main ]] || continue; else [[ $group == spare ]] || continue; fi
+      [[ $name == REALITY-2 ]] && shown_reality2=yes
+      if [[ $listen == 127.0.0.1 ]]; then mark="443/tcp"; else mark="$port/$(port_net "$proto")"; fi
+      [[ $(port_net "$proto") == both ]] && mark=$port
+      note=""
+      [[ -z $sni ]] || note="сайт: $sni"
+      [[ -n $fp && -z $fpl ]] && fpl=$fp
+      printf '  %s %s %s %s\n' "$(padr "$name" 20)" "$(padr "$mark" 12)" "$(padr "$([[ $en == true ]] && echo вкл || echo выкл)" 8)" "$note"
+    done < <(jq -r '.[] | (.streamSettings | if type == "string" then fromjson else . end) as $s
+      | [.remark, .port, .protocol, .listen, .enable, ($s.realitySettings.serverNames[0] // ""),
+         ($s.realitySettings.settings.fingerprint // $s.tlsSettings.settings.fingerprint // "")] | map(tostring) | join("|")' <<<"$list")
+  done
+  [[ $shown_reality2 == yes ]] || printf '  %s %s %s %s\n' "$(padr REALITY-2 20)" "$(padr – 12)" "$(padr выкл 8)" "включить: kit net on reality2"
+  echo
+  echo "Отпечаток клиента: ${fpl:-?} (сменить: kit net fp firefox)"
+}
+
+net_toggle() { # on|off имя [-y]
+  local act=$1 name row id en listen proto port net yes=no
+  shift
+  [[ -n ${1:-} ]] || die "kit net $act имя (например: kit net $act vmess-ws). Список: kit net"
+  name=$(net_resolve "$1"); [[ ${2:-} == -y || ${2:-} == --yes ]] && yes=yes
+  row=$(api GET inbounds/list | jq -c --arg n "${name,,}" '[.[] | select((.remark | ascii_downcase) == $n)][0] // empty')
+  if [[ -z $row ]]; then
+    if [[ $name == REALITY-2 && $act == on ]]; then reality_add; return; fi
+    die "Нет подключения «$name». Список: kit net"
+  fi
+  id=$(jq -r '.id' <<<"$row"); en=$(jq -r '.enable' <<<"$row"); listen=$(jq -r '.listen' <<<"$row")
+  proto=$(jq -r '.protocol' <<<"$row"); port=$(jq -r '.port' <<<"$row"); net=$(port_net "$proto")
+  if [[ $act == off ]]; then
+    [[ $en == true ]] || { say "$name уже выключен."; return 0; }
+    if net_main_name "$name" && [[ $yes == no ]]; then
+      if [[ -t 0 ]]; then
+        local ans; read -r -p "$name – основной протокол. Выключить? [y/N] " ans
+        [[ $ans =~ ^[yYдД]$ ]] || { echo "Отменено."; return 0; }
+      else die "$name – основной протокол. Выключить: kit net off $1 -y"; fi
+    fi
+    (api POST "inbounds/setEnable/$id" '{"enable":false}' >/dev/null) || die "Панель не приняла изменение. Ничего не изменилось."
+    if [[ $listen != 127.0.0.1 ]] && command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then port_ufw delete "$port" "$net"; fi
+    if [[ $listen != 127.0.0.1 ]]; then say "$name выключен, порт $port/$net закрыт. Вернуть: kit net on $1"; else say "$name выключен. Вернуть: kit net on $1"; fi
+    echo "Из подписки пропадёт при её обновлении в приложении."
+  else
+    [[ $en == true ]] && { say "$name уже включён."; return 0; }
+    if [[ $listen != 127.0.0.1 ]] && command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then port_ufw allow "$port" "$net"; fi
+    (api POST "inbounds/setEnable/$id" '{"enable":true}' >/dev/null) || die "Панель не приняла изменение. Ничего не изменилось."
+    say "$name включён."
+  fi
+}
+
+net_fp() { # отпечаток
+  local f=${1:-} n=0 id old
+  [[ -n $f ]] || die "kit net fp отпечаток (chrome, firefox, safari, edge, ios, android, qq, 360, random, randomized)"
+  f=${f,,}
+  [[ $f =~ ^(chrome|firefox|safari|edge|ios|android|qq|360|random|randomized)$ ]] || die "Неизвестный отпечаток «$f». Доступны: chrome, firefox, safari, edge, ios, android, qq, 360, random, randomized."
+  old=$(api GET inbounds/list | jq -r '[.[] | (.streamSettings | if type == "string" then fromjson else . end) | (.realitySettings.settings.fingerprint // .tlsSettings.settings.fingerprint // empty)][0] // "?"')
+  while read -r id; do
+    inbound_patch "$id" '.streamSettings |= ((if type == "string" then fromjson else . end)
+      | (if .realitySettings.settings then .realitySettings.settings.fingerprint = $f else . end)
+      | (if .tlsSettings.settings then .tlsSettings.settings.fingerprint = $f else . end)
+      | (if .externalProxy then .externalProxy |= map(if has("fingerprint") then .fingerprint = $f else . end) else . end))' --arg f "$f" \
+      && n=$((n + 1))
+  done < <(api GET inbounds/list | jq -r '.[] | select((.streamSettings | if type == "string" then fromjson else . end) | (.security == "reality" or .security == "tls")) | .id')
+  say "Отпечаток $old → ${B}$f${N}, обновлено подключений: $n."
+  echo "Подписка обновится сама; вручную сохранённые ссылки замените (kit user link имя)."
+  echo "Меняйте, если связь пропала сразу у многих, а не из-за одного неудачного раза."
+}
+
+cmd_net() {
+  local sub=${1:-}
+  [[ -z $sub ]] || shift
+  case ${sub,,} in
+    "") net_show ;;
+    site) [[ $# -gt 0 ]] || set -- --nearby; sni_rotate "$@" ;;
+    port) port_set "$@" ;;
+    off | on) net_toggle "${sub,,}" "$@" ;;
+    fp) net_fp "$@" ;;
+    vision) case ${1:-} in on) cmd_vision --all ;; off) cmd_vision --all off ;; *) die "kit net vision on|off" ;; esac ;;
+    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | vision on|off]" ;;
+  esac
+}
+
+# ---------- меню (как у x-ui) ----------
+
+BOX_W=48
+box_rule() { local i; for ((i = 0; i < BOX_W; i++)); do printf '─'; done; }
+box_top() { printf '╔'; box_rule; printf '╗\n'; }
+box_bot() { printf '╚'; box_rule; printf '╝\n'; }
+box_sep() { printf '│'; box_rule; printf '│\n'; }
+padr() { local n=$(($2 - ${#1})); ((n < 0)) && n=0; printf '%s%*s' "$1" "$n" ''; }  # по символам: printf %-Ns считает байты
+box_line() { printf '│  %s│\n' "$(padr "$1" $((BOX_W - 2)))"; }
+box() { # заголовок, затем пункты; пустой пункт – разделитель
+  local t=$1 l; shift
+  box_top; box_line "$t"; box_sep
+  for l in "$@"; do if [[ -z $l ]]; then box_sep; else box_line "$l"; fi; done
+  box_bot
+}
+ask_tty() { read -r -p "$1" REPLY </dev/tty || exit 0; }
+ask_num() { ask_tty "$1"; REPLY=${REPLY//[[:space:]]/}; }
+pause() { read -r -p "${D}Enter – в меню${N} " _ </dev/tty || exit 0; }
+run_action() { ( "$@" ) || true; }
+
+menu_status() {
+  local sni users st auto
+  sni=$(sni_targets 2>/dev/null | awk -F'\t' '$2 == "reality" || $2 == "self" {print $4; exit}' || true)
+  users=$(clients 2>/dev/null | jq '[.[] | select(.email | test("-awg[0-9]*$") | not)] | length' 2>/dev/null || echo "?")
+  if systemctl is-active -q x-ui; then st="панель работает"; else st="панель НЕ работает"; fi
+  if auto_enabled; then auto=вкл; else auto=выкл; fi
+  echo "Сервер: ${HOST:-?} · Сайт маскировки: ${sni:--}"
+  echo "Состояние: $st · Xray $(xray_version 2>/dev/null || echo '?') · пользователей $users · автообновление $auto"
+}
+
+pick_user() {
+  cmd_list
+  ask_tty "Имя пользователя: "
+  PICK=${REPLY//[[:space:]]/}
+  [[ -n $PICK ]] || return 1
+  valid_name "$PICK"
+}
+
+u_add() {
+  local name gb days dev a=()
+  ask_tty "Имя пользователя: "; name=${REPLY//[[:space:]]/}
+  ask_tty "Лимит трафика, ГБ (Enter – без лимита): "; gb=${REPLY//[[:space:]]/}
+  ask_tty "Срок, дней (Enter – без срока): "; days=${REPLY//[[:space:]]/}
+  ask_tty "Устройств (Enter – без ограничения): "; dev=${REPLY//[[:space:]]/}
+  [[ -z $gb ]] || a+=(--gb "$gb"); [[ -z $days ]] || a+=(--days "$days"); [[ -z $dev ]] || a+=(--devices "$dev")
+  cmd_add "$name" "${a[@]}"
+}
+u_link() {
+  pick_user || return 0
+  ask_num "1 – ссылки, 2 – AmneziaVPN, 3 – Telegram [1]: "
+  case ${REPLY:-1} in 2) cmd_link "$PICK" --amnezia ;; 3) cmd_link "$PICK" --telegram ;; *) cmd_link "$PICK" ;; esac
+}
+u_limit() {
+  local gb days dev a=()
+  pick_user || return 0
+  echo "Enter – не менять, 0 – без ограничения."
+  ask_tty "Лимит трафика, ГБ: "; gb=${REPLY//[[:space:]]/}
+  ask_tty "Срок, дней: "; days=${REPLY//[[:space:]]/}
+  ask_tty "Устройств: "; dev=${REPLY//[[:space:]]/}
+  [[ -z $gb ]] || a+=(--gb "$gb"); [[ -z $days ]] || a+=(--days "$days"); [[ -z $dev ]] || a+=(--devices "$dev")
+  ((${#a[@]})) || { echo "Ничего не изменено."; return 0; }
+  cmd_limit "$PICK" "${a[@]}"
+}
+u_toggle() {
+  pick_user || return 0
+  ask_num "1 – выключить, 2 – включить: "
+  case $REPLY in 1) cmd_toggle "$PICK" false ;; 2) cmd_toggle "$PICK" true ;; *) echo "Отменено." ;; esac
+}
+u_del() { pick_user || return 0; cmd_del "$PICK"; }
+
+menu_users() {
+  local c
+  while :; do
+    echo
+    box "Пользователи" "1. Список (трафик, срок, статус)" "2. Добавить" "3. Показать ссылки" "4. Изменить лимит" "5. Выключить или включить" "6. Удалить" "" "0. Назад"
+    ask_num "Выбор [0-6]: "; c=$REPLY
+    case $c in
+      1) run_action cmd_list; pause ;;
+      2) run_action u_add; pause ;;
+      3) run_action u_link; pause ;;
+      4) run_action u_limit; pause ;;
+      5) run_action u_toggle; pause ;;
+      6) run_action u_del; pause ;;
+      0 | "") return 0 ;;
+      *) echo "Нет такого пункта." ;;
+    esac
+  done
+}
+
+pick_proto() { # PICK = название подключения (в том числе ещё не созданный REALITY-2)
+  local -a names=(); local i n en
+  mapfile -t names < <(api GET inbounds/list | jq -r '.[] | [.remark, (if .enable then "вкл" else "выкл" end)] | @tsv')
+  names+=("REALITY-2"$'\t'"создать")
+  i=0
+  for n in "${names[@]}"; do
+    i=$((i + 1))
+    if [[ $n == REALITY-2$'\t'* ]] && api GET inbounds/list | jq -e 'any(.[]; .remark == "REALITY-2")' >/dev/null; then names[i-1]=""; i=$((i)); continue; fi
+    printf '  %2d  %-16s %s\n' "$i" "${n%%$'\t'*}" "${n#*$'\t'}"
+  done
+  ask_num "Номер: "
+  [[ $REPLY =~ ^[0-9]+$ ]] && ((REPLY >= 1 && REPLY <= ${#names[@]})) && [[ -n ${names[REPLY-1]} ]] || { echo "Отменено."; return 1; }
+  PICK=${names[REPLY-1]%%$'\t'*}
+}
+
+n_site() {
+  ask_num "1 – подобрать автоматически (сначала соседи по подсети), 2 – свой сайт [1]: "
+  if [[ ${REPLY:-1} == 2 ]]; then
+    ask_tty "Адрес сайта (например example.com): "
+    [[ -n ${REPLY//[[:space:]]/} ]] || { echo "Отменено."; return 0; }
+    sni_rotate "${REPLY//[[:space:]]/}"
+  else
+    sni_rotate --nearby
+  fi
+}
+n_port() { local p; pick_proto || return 0; p=$PICK; ask_num "Новый порт: "; port_set "$p" "$REPLY"; }
+n_toggle() {
+  local en
+  pick_proto || return 0
+  en=$(api GET inbounds/list | jq -r --arg n "$PICK" '[.[] | select(.remark == $n)][0].enable // "none"')
+  case $en in
+    true) net_toggle off "$PICK" ;;
+    false) net_toggle on "$PICK" ;;
+    *) net_toggle on "$PICK" ;;
+  esac
+}
+n_fp() {
+  local -a fps=(chrome firefox safari edge ios android qq 360 random randomized); local i
+  for i in "${!fps[@]}"; do printf '  %2d  %s\n' "$((i + 1))" "${fps[$i]}"; done
+  ask_num "Номер: "
+  [[ $REPLY =~ ^[0-9]+$ ]] && ((REPLY >= 1 && REPLY <= ${#fps[@]})) || { echo "Отменено."; return 0; }
+  net_fp "${fps[REPLY-1]}"
+}
+
+menu_net() {
+  local c
+  while :; do
+    echo
+    box "Протоколы, порты и маскировка" "1. Показать протоколы и порты" "2. Сменить сайт маскировки" "3. Сменить порт протокола" "4. Выключить или включить протокол" "5. Сменить отпечаток клиента" "6. Второй REALITY на высоком порту" "" "0. Назад"
+    ask_num "Выбор [0-6]: "; c=$REPLY
+    case $c in
+      1) run_action net_show; pause ;;
+      2) run_action n_site; pause ;;
+      3) run_action n_port; pause ;;
+      4) run_action n_toggle; pause ;;
+      5) run_action n_fp; pause ;;
+      6) run_action net_toggle on reality2; pause ;;
+      0 | "") return 0 ;;
+      *) echo "Нет такого пункта." ;;
+    esac
+  done
+}
+
+menu_check() {
+  local c
+  while :; do
+    echo
+    box "Проверка сервера" "1. Быстрая проверка" "2. Глубокая (подключиться клиентом)" "3. Исправить безопасное" "" "0. Назад"
+    ask_num "Выбор [0-3]: "; c=$REPLY
+    case $c in
+      1) run_action cmd_check; pause ;;
+      2) run_action cmd_check --deep; pause ;;
+      3) run_action cmd_fix; pause ;;
+      0 | "") return 0 ;;
+      *) echo "Нет такого пункта." ;;
+    esac
+  done
+}
+
+menu_auto() {
+  local ans
+  if auto_enabled; then
+    ask_tty "Автообновление сейчас включено (ночью, только подписанные релизы). Выключить? [y/N] "
+    [[ $REPLY =~ ^[yYдД]$ ]] && auto_off && say "Автообновление выключено. Обновляться вручную: пункт 4."
+  else
+    ask_tty "Автообновление сейчас выключено. Включить? [y/N] "
+    [[ $REPLY =~ ^[yYдД]$ ]] && auto_on && say "Автообновление включено."
+  fi
+  return 0
+}
+
+menu_main() {
+  local c
+  while :; do
+    echo
+    box "3X-UI KIT $KIT_VERSION – управление сервером" "1. Пользователи" "2. Протоколы, порты и маскировка" "3. Проверка сервера" "" \
+      "4. Обновить kit и подписку" "5. Обновить панель 3X-UI" "6. Автообновление: включить или выключить" "" \
+      "7. Резервная копия" "8. Версии" "" "9. Панель 3X-UI (меню x-ui)" "0. Выход"
+    echo
+    menu_status
+    echo
+    ask_num "Выбор [0-9]: "; c=$REPLY
+    case $c in
+      1) menu_users ;;
+      2) menu_net ;;
+      3) menu_check ;;
+      4) run_action cmd_update; pause ;;
+      5) run_action panel_update; pause ;;
+      6) run_action menu_auto; pause ;;
+      7) run_action cmd_backup; pause ;;
+      8) run_action cmd_version; pause ;;
+      9) command -v x-ui >/dev/null && x-ui || echo "Меню x-ui не найдено." ;;
+      0 | "") return 0 ;;
+      *) echo "Нет такого пункта." ;;
+    esac
+  done
+}
+
 usage() {
   cat <<EOF
-${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
+${B}3X-UI KIT $KIT_VERSION${N} – команды (то же самое есть в меню: просто ${B}kit${N})
 
-Пользователи (один пользователь сразу на всех протоколах):
-  kit user add имя [--gb 50] [--days 30] [--devices 3]   добавить и показать подписку
-  kit user list                                           трафик, срок, статус
-  kit user link имя [--all|--amnezia|--telegram]          подписка и QR; --all, --amnezia, --telegram – отдельные ссылки
-  kit user limit имя [--gb N] [--days N] [--devices N]    изменить лимиты (0 – без ограничений)
-  kit user off имя  /  kit user on имя                    выключить и включить
-  kit user del имя                                        удалить
-  kit panel update [--force]                              обновить панель 3X-UI до проверенной версии (ядро и настройки сохраняются)
-  kit user vision имя|--all [off]                         включить xtls-rprx-vision для REALITY (у новых пользователей включён сам)
-  kit user enforce [--dry-run]                            применить общий лимит сейчас (обычно само, раз в 5 минут)
-
-Сервер:
-  kit update            обновить kit и подписку kit-sub сейчас (пользователи и ссылки не меняются)
-  kit update --manual   выключить автообновление (--auto – включить обратно)
-  kit backup            резервная копия сервера (подключения, ключи, пользователи)
-  kit check [--deep]    проверить сервер: службы, сертификат, подписка, сайт маскировки, права; --deep – ещё и подключиться клиентом
-  kit fix [--dry-run]   исправить безопасное: перезапустить службы, права, автообновление, сертификат
-  kit port              порты подключений; kit port set имя порт – сменить (ufw и ссылки обновятся)
-  kit reality add [порт]  добавить второй REALITY на высоком порту (для сетей, где привычные порты проходят хуже)
-  kit sni               сайты маскировки; kit sni rotate [--nearby] [сайт] – сменить (--nearby – искать в подсети сервера)
-  kit version           версия kit, панели и ядра
+  kit                        меню
+  kit user …                 add, list, link, limit, on, off, del
+  kit net …                  протоколы, порты, сайт маскировки, отпечаток
+  kit check [--deep|--fix]   проверка сервера
+  kit update [--panel]       обновление (--auto и --manual – автообновление)
+  kit backup                 копия сервера
+  kit version                версии
 EOF
 }
 
 # Регистр и «users» вместо «user» не должны ломать команду; имя пользователя (третье слово) не трогаем.
 cmd_key="${1:-} ${2:-}"; cmd_key=${cmd_key,,}; cmd_key=${cmd_key/users /user }
 case "$cmd_key" in
+  " ") if [[ -t 0 && -t 1 ]]; then menu_main; else usage; fi ;;
   "user add") shift 2; cmd_add "$@" ;;
   "user list") cmd_list; update_hint ;;
   "user link") shift 2; cmd_link "$@" ;;
@@ -1496,14 +1879,16 @@ case "$cmd_key" in
   "user del") shift 2; cmd_del "$@" ;;
   "user enforce") shift 2; cmd_enforce "$@" ;;
   "user vision") shift 2; cmd_vision "$@" ;;
+  "net "*) shift; cmd_net "$@" ;;
+  "sni rotate") shift 2; sni_rotate "$@" ;;
+  "sni "*) [[ -z ${2:-} ]] || die "Команда: kit net site"; sni_show ;;
+  "port set") shift 2; port_set "$@" ;;
+  "port "*) [[ -z ${2:-} ]] || die "Команда: kit net port имя порт"; net_show ;;
+  "reality add") shift 2; reality_add "$@" ;;
   "panel update") shift 2; panel_update "$@" ;;
   "__limit-timer on") limit_timer_on ;;
+  "__links "*) links_block "${2:-}" "${3:-}" ;;
   "update "*) shift; cmd_update "$@" ;;
-  "reality add") shift 2; reality_add "$@" ;;
-  "port set") shift 2; port_set "$@" ;;
-  "port "*) [[ -z ${2:-} ]] || die "Команда: kit port  или  kit port set имя порт"; port_show ;;
-  "sni rotate") shift 2; sni_rotate "$@" ;;
-  "sni "*) [[ -z ${2:-} ]] || die "Команда: kit sni  или  kit sni rotate [--nearby] [--dry-run] [сайт]"; sni_show ;;
   "backup "*) cmd_backup ;;
   "check "*) shift; cmd_check "$@" ;;
   "fix "*) shift; cmd_fix "$@" ;;

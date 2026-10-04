@@ -24,7 +24,7 @@ declare -A HY_SHA256=(
   [amd64]=8c7a68a906998b747a0db87586e364f995fbfddb95693ae6e2fdb68a6e920d3e
   [arm64]=c8dc653c3ba0a28d29a26b8fa52d2086f27c0927afddce95c09965e7174e78b0
 )
-KIT_VERSION="1.1.2"
+KIT_VERSION="1.2"
 KIT_REPO_RAW="https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT"
 # Скрипт берём из тега релиза, а не из меняющейся ветки main.
 SELF_URL="$KIT_REPO_RAW/v$KIT_VERSION/scripts/hysteria2.sh"
