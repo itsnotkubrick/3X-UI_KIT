@@ -1105,6 +1105,164 @@ PY
   echo
 }
 
+# ---------- сайт маскировки: kit sni ----------
+
+SNI_POOL=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com www.microsoft.com www.cloudflare.com)
+SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+
+host_ip() { # IPv4 сервера
+  local h=${HOST:-}
+  if [[ $h =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then echo "$h"; else getent ahostsv4 "$h" 2>/dev/null | awk 'NR == 1 {print $1}'; fi
+}
+
+same_net() { # имя: есть ли у сайта адрес в той же /24, что у сервера
+  local me ip
+  me=$(host_ip); [[ -n $me ]] || return 1
+  while read -r ip; do [[ -n $ip && ${ip%.*} == "${me%.*}" ]] && return 0; done < <(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u)
+  return 1
+}
+
+# Подключения, у которых есть сайт маскировки: id, вид (reality, mtproto, self – свой домен), название, сайт.
+sni_targets() {
+  api GET inbounds/list | jq -r '.[] | (.streamSettings | if type == "string" then fromjson else . end) as $s
+    | (.settings | if type == "string" then fromjson else . end) as $c
+    | if .protocol == "vless" and $s.security == "reality" then
+        [.id, (if (($s.realitySettings.target // "") | startswith("127.0.0.1:")) then "self" else "reality" end), .remark, ($s.realitySettings.serverNames[0] // "")]
+      elif .protocol == "mtproto" then [.id, "mtproto", .remark, ($c.fakeTlsDomain // "")]
+      else empty end | @tsv'
+}
+
+sni_body() { # id вид новый-сайт → тело для inbounds/update
+  api GET inbounds/list | jq -c --argjson id "$1" --arg k "$2" --arg n "$3" '.[] | select(.id == $id)
+    | (.streamSettings | if type == "string" then fromjson else . end) as $s
+    | (.settings | if type == "string" then fromjson else . end) as $c
+    | (if $k == "reality" then ($s | .realitySettings.serverNames = [$n] | .realitySettings.target = ($n + ":443")) else $s end) as $s2
+    | (if $k == "mtproto" then ($c | .fakeTlsDomain = $n) else $c end) as $c2
+    | {id, remark, enable, listen, port, protocol, expiryTime, total, settings: ($c2 | tojson), streamSettings: ($s2 | tojson),
+       sniffing: (.sniffing | if type == "string" then . else tojson end)}'
+}
+
+# Сайты из подсети сервера (/24): заходим на соседние адреса по 443 без имени, читаем имена из сертификата,
+# оставляем те, чьё имя указывает в эту же подсеть и отвечает по TLS 1.3 + HTTP/2.
+nearby_sites() {
+  local me base names n
+  me=$(host_ip)
+  [[ $me =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "Не удалось определить IPv4 сервера для поиска соседей."
+  base=${me%.*}
+  names=$(seq 1 254 | xargs -P 24 -I{} bash -c '
+      ip=$1; [ "$ip" = "$2" ] && exit 0
+      echo | timeout 4 openssl s_client -connect "$ip:443" -tls1_3 -alpn h2 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null \
+        | tr "," "\n" | sed -n "s/^ *DNS://p"' _ "$base.{}" "$me" 2>/dev/null | sort -u | grep -E "$SNI_RE" | head -40 || true)
+  for n in $names; do
+    [[ $n == "$me" ]] && continue
+    if same_net "$n" && sni_alive "$n"; then echo "$n"; fi
+  done
+}
+
+sni_show() {
+  local id kind remark sni mark
+  say "Сайты маскировки (сервер: ${HOST:-?})"
+  while IFS=$'\t' read -r id kind remark sni; do
+    [[ -n $sni ]] || continue
+    if [[ $kind == self ]]; then mark="свой домен"
+    elif same_net "$sni"; then mark="из подсети сервера"
+    else mark="чужая подсеть"; fi
+    printf '  %-10s %-28s %s\n' "$remark" "$sni" "$mark"
+  done < <(sni_targets)
+  echo
+  echo "Сменить: ${B}kit sni rotate${N} (сам подберёт), ${B}kit sni rotate --nearby${N} (искать в подсети сервера), ${B}kit sni rotate сайт.com${N}"
+}
+
+sni_rotate() { # [--nearby] [--dry-run] [сайт]
+  local nearby=no dry=no site="" a
+  while (($#)); do
+    case $1 in
+      --nearby) nearby=yes ;;
+      --dry-run) dry=yes ;;
+      -*) die "Неизвестный параметр $1. Команда: kit sni rotate [--nearby] [--dry-run] [сайт]" ;;
+      *) site=${1,,}; [[ $site =~ $SNI_RE ]] || die "Нужно имя сайта, например dl.google.com (без https://)." ;;
+    esac
+    shift
+  done
+  local -a ids=() kinds=() remarks=() olds=() news=() pool=() used=()
+  local id kind remark sni
+  while IFS=$'\t' read -r id kind remark sni; do
+    [[ $kind == self || -z $sni ]] && continue
+    ids+=("$id"); kinds+=("$kind"); remarks+=("$remark"); olds+=("$sni"); used+=("$sni")
+  done < <(sni_targets)
+  ((${#ids[@]})) || die "Нет подключений, у которых можно сменить сайт маскировки (при своём домене маскировка уже под ваш сайт)."
+
+  [[ -z $site ]] || { pool+=("$site"); }
+  if [[ $nearby == yes ]]; then
+    say "Ищу сайты в подсети сервера (около 250 коротких подключений к порту 443 соседних адресов)"
+    while read -r a; do [[ -n $a ]] && pool+=("$a"); done < <(nearby_sites)
+    ((${#pool[@]})) || warn "В подсети подходящих сайтов не нашёл, возьму из обычного списка."
+  fi
+  pool+=("${SNI_POOL[@]}")
+
+  local c i taken
+  for i in "${!ids[@]}"; do
+    for c in "${pool[@]}"; do
+      taken=no
+      for a in "${used[@]}" "${news[@]}"; do [[ $a == "$c" ]] && taken=yes; done
+      [[ $taken == yes ]] && continue
+      if sni_alive "$c"; then news+=("$c"); break; fi
+      [[ $c == "$site" ]] && die "$c не отвечает по TLS 1.3 + HTTP/2 – REALITY с ним работать не будет."
+    done
+    [[ -n ${news[$i]:-} ]] || die "Не нашёл свободный сайт для ${remarks[$i]}: все из списка заняты или не отвечают по TLS 1.3 + HTTP/2. Укажите свой: kit sni rotate сайт.com"
+  done
+
+  echo "${B}Было → станет:${N}"
+  for i in "${!ids[@]}"; do
+    printf '  %-10s %-28s → %s%s\n' "${remarks[$i]}" "${olds[$i]}" "${news[$i]}" "$(same_net "${news[$i]}" && echo '  (из подсети сервера)')"
+  done
+  [[ $dry == no ]] || { echo "${D}(--dry-run: ничего не менял)${N}"; return 0; }
+
+  local bak=/root/x-ui-before-sni-$(date +%Y%m%d-%H%M%S).db
+  install -m 600 /dev/null "$bak"; cat /etc/x-ui/x-ui.db >"$bak"
+  say "Копия базы панели: $bak"
+
+  local -a done_i=()
+  sni_revert() {
+    local j
+    warn "Возвращаю прежние сайты."
+    for j in "${done_i[@]}"; do
+      (api POST "inbounds/update/${ids[$j]}" "$(sni_body "${ids[$j]}" "${kinds[$j]}" "${olds[$j]}")" >/dev/null) 2>/dev/null || warn "Не удалось вернуть ${remarks[$j]}: восстановите из $bak"
+    done
+  }
+  local body
+  for i in "${!ids[@]}"; do
+    body=$(sni_body "${ids[$i]}" "${kinds[$i]}" "${news[$i]}")
+    [[ -n $body ]] || { sni_revert; die "Не нашёл подключение ${remarks[$i]} в панели."; }
+    if ! (api POST "inbounds/update/${ids[$i]}" "$body" >/dev/null); then sni_revert; die "Панель не приняла новый сайт для ${remarks[$i]}. Ничего не изменилось."; fi
+    done_i+=("$i")
+  done
+
+  # Режим «всё на 443»: nginx различает подключения по имени сайта, обновляем его таблицу.
+  local conf=/etc/nginx/kit-stream.conf
+  if [[ ${SINGLE:-no} == yes && -f $conf ]]; then
+    local cbak tmp
+    cbak=$(mktemp); cp -p "$conf" "$cbak"; tmp=$(mktemp)
+    cp "$conf" "$tmp"
+    for i in "${!ids[@]}"; do
+      awk -v o="${olds[$i]}" -v n="${news[$i]}" '$1 == o && $2 ~ /^127\.0\.0\.1:[0-9]+;$/ {printf "        %s %s\n", n, $2; next} {print}' "$tmp" >"$tmp.n" && mv "$tmp.n" "$tmp"
+    done
+    cat "$tmp" >"$conf"; rm -f "$tmp"
+    if ! nginx -t >/dev/null 2>&1 || ! systemctl reload nginx; then
+      cat "$cbak" >"$conf"; rm -f "$cbak"
+      sni_revert; nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+      die "nginx не принял новые имена. Всё возвращено как было."
+    fi
+    rm -f "$cbak"
+  fi
+
+  sleep 2
+  systemctl is-active -q x-ui || warn "Панель не отвечает – проверьте: systemctl status x-ui"
+  say "Готово. Сайт маскировки сменён."
+  echo "Подписка у клиентов обновится сама при следующем обновлении подписки в приложении."
+  echo "Ссылки REALITY, XHTTP и MTProto, сохранённые вручную, нужно заменить на новые: ${B}kit user link имя --all${N}"
+}
+
 usage() {
   cat <<EOF
 ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
@@ -1126,6 +1284,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
   kit backup            резервная копия сервера (подключения, ключи, пользователи)
   kit check             проверить сервер: службы, сертификат, подписка, сайт маскировки, права
   kit fix [--dry-run]   исправить безопасное: перезапустить службы, права, автообновление, сертификат
+  kit sni               сайты маскировки; kit sni rotate [--nearby] [сайт] – сменить (--nearby – искать в подсети сервера)
   kit version           версия kit, панели и ядра
 EOF
 }
@@ -1145,6 +1304,8 @@ case "$cmd_key" in
   "panel update") shift 2; panel_update "$@" ;;
   "__limit-timer on") limit_timer_on ;;
   "update "*) shift; cmd_update "$@" ;;
+  "sni rotate") shift 2; sni_rotate "$@" ;;
+  "sni "*) [[ -z ${2:-} ]] || die "Команда: kit sni  или  kit sni rotate [--nearby] [--dry-run] [сайт]"; sni_show ;;
   "backup "*) cmd_backup ;;
   "check "*) cmd_check ;;
   "fix "*) shift; cmd_fix "$@" ;;

@@ -135,22 +135,22 @@ choose_masking() {
   echo "Чтобы сервер не выделялся, он притворяется обычным сайтом. Имя этого сайта (SNI) видно"
   echo "всем по пути, поэтому от выбора зависит, насколько трудно вас заметить."
   echo
-  echo "  ${B}1)${N} Стандартный сайт ${D}(рекомендуем, если не уверены)${N}"
-  echo "     Сервер притворяется популярным сайтом (по умолчанию ${SNI_CANDIDATES[0]}). Ничего готовить"
-  echo "     не нужно, работает сразу. Минус: IP вашего сервера не принадлежит этому сайту,"
-  echo "     и при желании цензор может это заметить."
-  echo
-  echo "  ${B}2)${N} Свой домен ${D}(надёжнее)${N}"
+  echo "  ${B}1)${N} Свой домен ${D}(рекомендуем, если он у вас есть)${N}"
   echo "     Сервер притворяется вашим собственным сайтом: на нём настоящая страница и сертификат"
-  echo "     Let's Encrypt. Нужно заранее: свой домен, его A-запись на IP этого сервера и свободный"
-  echo "     порт 80. Сертификат установщик получит сам."
+  echo "     Let's Encrypt, а IP и имя совпадают. Нужно заранее: свой домен, его A-запись на IP этого"
+  echo "     сервера и свободный порт 80. Сертификат установщик получит сам."
   echo "     ${D}Честно: сертификат домена попадает в публичные журналы сертификатов, поэтому связь${N}"
   echo "     ${D}«домен – сервер» не скрыта. «Надёжнее» не значит «невидимо».${N}"
   echo
+  echo "  ${B}2)${N} Стандартный сайт ${D}(если домена нет)${N}"
+  echo "     Сервер притворяется популярным сайтом (по умолчанию ${SNI_CANDIDATES[0]}). Ничего готовить"
+  echo "     не нужно, работает сразу. Минус: IP вашего сервера не принадлежит этому сайту,"
+  echo "     это можно заметить, и такой сервер может прожить недолго. Сменить сайт позже: kit sni rotate."
+  echo
   local d="" prev=""
-  ask_tty "Ваш выбор [1]: " || return 0
+  ask_tty "Ваш выбор [2]: " || return 0
   REPLY=${REPLY//[[:space:]]/}
-  [[ ${REPLY%.} == 2 ]] || { echo; return 0; }
+  [[ ${REPLY%.} == 1 ]] || { echo; return 0; }
   while :; do
     if [[ -n $prev ]]; then ask_tty "Ваш домен [$prev]: " || return 0
     else ask_tty "Ваш домен, например vpn.example.com (пусто – стандартный сайт): " || return 0; fi
@@ -413,6 +413,7 @@ main() {
     SNI=$DOMAIN
   elif [[ -z $SNI ]]; then
     say "Выбираю сайт для маскировки REALITY"
+    warn "Маскировка под чужой сайт: IP сервера ему не принадлежит, это заметно. Надёжнее свой домен (--domain vpn.example.com) или сайт из подсети хостера (kit sni rotate --nearby)."
     for s in "${SNI_CANDIDATES[@]}"; do
       if sni_ok "$s"; then SNI=$s; break; fi
     done
@@ -1065,7 +1066,7 @@ brand_xui_menu() {
 # скрипта, со сторонних сайтов ничего не скачивается.
 stub_site() {
   local n year
-  n=$(rnd 1 6); year=$(date +%Y)
+  n=$(rnd 1 9); year=$(date +%Y)
   case $n in
     1) cat <<'HTML'
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Welcome</title><style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f7f9;color:#1f2328}main{text-align:center;padding:24px}h1{font-weight:600;font-size:28px}p{color:#57606a}</style></head><body><main><h1>Site is under construction</h1><p>Please check back soon.</p></main></body></html>
@@ -1089,6 +1090,19 @@ HTML
     ;;
     6) cat <<HTML
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Status</title><style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#fff;color:#24292f}main{max-width:560px;margin:64px auto;padding:0 20px}h1{font-size:22px}.r{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #eaeef2}.ok{color:#1a7f37}small{color:#8c959f}</style></head><body><main><h1>System status</h1><div class="r"><span>Website</span><span class="ok">Operational</span></div><div class="r"><span>API</span><span class="ok">Operational</span></div><div class="r"><span>Storage</span><span class="ok">Operational</span></div><p><small>Updated automatically &middot; $year</small></p></main></body></html>
+HTML
+    ;;
+    7) cat <<HTML
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cumulo Cloud Status</title><style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f8fa;color:#1f2328}header{background:#0b3d5c;color:#fff;padding:28px 20px}header div,main{max-width:720px;margin:0 auto}h1{font-size:20px;margin:0}.b{background:#dafbe1;color:#1a7f37;border:1px solid #aceebb;border-radius:6px;padding:12px 16px;margin:20px 0;font-weight:600}.r{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #d0d7de}.u{display:flex;gap:2px}.u i{width:5px;height:20px;background:#2da44e;border-radius:1px}.u i.w{background:#bf8700}small{color:#656d76}main{padding:0 20px 40px}</style></head><body><header><div><h1>Cumulo Cloud</h1><small style="color:#b6d4e8">Service status</small></div></header><main><div class="b">All systems operational</div><div class="r"><span>Compute (eu-north)</span><span class="u"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="w"></i><i></i><i></i><i></i><i></i></span></div><div class="r"><span>Object storage</span><span class="u"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div><div class="r"><span>Managed databases</span><span class="u"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div><div class="r"><span>API &amp; console</span><span class="u"><i></i><i></i><i></i><i class="w"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div><p><small>Past 12 days &middot; &copy; $year Cumulo Cloud</small></p></main></body></html>
+HTML
+    ;;
+    8) cat <<HTML
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cumulo Cloud API Reference</title><style>body{margin:0;font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#1f2328;display:flex;min-height:100vh}nav{width:220px;background:#0b3d5c;color:#cfe3f1;padding:24px 18px;box-sizing:border-box}nav b{color:#fff;display:block;margin-bottom:16px}nav p{margin:6px 0}main{flex:1;max-width:760px;padding:32px}h1{font-size:24px}code,pre{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f8fa;border-radius:6px}pre{padding:14px;overflow:auto;font-size:13px}code{padding:2px 5px}.m{display:inline-block;background:#ddf4ff;color:#0969da;font-weight:600;padding:1px 8px;border-radius:4px;font-size:13px}small{color:#656d76}@media(max-width:600px){nav{display:none}}</style></head><body><nav><b>Cumulo Cloud</b><p>Overview</p><p>Authentication</p><p>Instances</p><p>Volumes</p><p>Networks</p><p>Errors</p></nav><main><h1>Instances</h1><p>Create, list and delete compute instances. All requests use a bearer token in the <code>Authorization</code> header.</p><p><span class="m">GET</span> <code>/v2/instances</code></p><pre>curl https://api.example.com/v2/instances \
+  -H "Authorization: Bearer &lt;token&gt;"</pre><p><span class="m">POST</span> <code>/v2/instances</code></p><pre>{ "name": "web-1", "region": "eu-north", "size": "s-2vcpu-4gb" }</pre><p><small>API version 2 &middot; &copy; $year Cumulo Cloud</small></p></main></body></html>
+HTML
+    ;;
+    9) cat <<HTML
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in - Cumulo Cloud Console</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0b3d5c}form{background:#fff;width:320px;padding:32px;border-radius:10px;box-sizing:border-box}h1{font-size:20px;margin:0 0 4px}p{color:#656d76;margin:0 0 20px;font-size:14px}label{display:block;font-size:13px;margin:12px 0 4px}input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d0d7de;border-radius:6px;font-size:14px}button{width:100%;margin-top:20px;padding:10px;border:0;border-radius:6px;background:#0969da;color:#fff;font-size:14px;font-weight:600}small{display:block;text-align:center;color:#8c959f;margin-top:16px}</style></head><body><form onsubmit="return false"><h1>Cumulo Cloud</h1><p>Sign in to the console</p><label>Email</label><input type="email" autocomplete="off"><label>Password</label><input type="password" autocomplete="off"><button type="button">Sign in</button><small>&copy; $year Cumulo Cloud</small></form></body></html>
 HTML
     ;;
   esac
