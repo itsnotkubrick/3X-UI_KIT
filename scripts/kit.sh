@@ -1386,7 +1386,8 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
     [[ ! $REPLY =~ ^[nNнН]$ ]] || { echo "Отменено."; return 0; }
   fi
 
-  local bak=/root/x-ui-before-sni-$(date +%Y%m%d-%H%M%S).db
+  local bak
+  bak=/root/x-ui-before-sni-$(date +%Y%m%d-%H%M%S).db
   install -m 600 /dev/null "$bak"; cat /etc/x-ui/x-ui.db >"$bak"
   say "Копия базы панели: $bak"
 
