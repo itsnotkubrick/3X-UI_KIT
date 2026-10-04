@@ -313,10 +313,10 @@ main() {
     die "3X-UI уже установлена другим способом – не трогаю её. Удалите её (x-ui uninstall) или добавьте REALITY в панели вручную."
   fi
 
-  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no
+  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no restore=""
   while [[ $# -gt 0 ]]; do
     case $1 in
-      --port | --sni | --panel-ssl | --host | --user | --protocols | --domain | --cert | --key)
+      --port | --sni | --panel-ssl | --host | --user | --protocols | --domain | --cert | --key | --restore)
         [[ -n ${2-} ]] || die "У параметра $1 нет значения (см. --help)" ;;
     esac
     case $1 in
@@ -330,6 +330,7 @@ main() {
       --cert) ucert=$2; shift 2 ;;
       --multi-port) multi=yes; shift ;;
       --key) ukey=$2; shift 2 ;;
+      --restore) restore=$2; shift 2 ;;
       --no-ufw) UFW=no; shift ;;
       -y|--yes) yes=yes; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -338,6 +339,11 @@ main() {
   done
   [[ $PORT =~ ^[0-9]{1,5}$ ]] && ((10#$PORT > 0 && 10#$PORT < 65536)) || die "Неверный порт: $PORT"
   PORT=$((10#$PORT))
+  if [[ -n $restore ]]; then
+    [[ -z $HOST || $HOST =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "--host при восстановлении: IP нового сервера"
+    restore_main "$restore"
+    return
+  fi
   # Регистр и точка в конце не важны: vpn.Example.com. – это тот же vpn.example.com.
   local k
   for k in SNI DOMAIN HOST; do
@@ -1404,6 +1410,215 @@ sub_links() {
   if grep -q '://' <<<"$raw"; then echo "$raw"; else base64 -d <<<"$raw" 2>/dev/null || true; fi
 }
 
+# Файл настроек из копии можно подключать, только если в нём нет ничего, кроме
+# ИМЯ=значение без подстановок и команд.
+safe_env() {
+  [[ -r $1 ]] || die "В копии нет файла ${1##*/}."
+  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=-]*|'[^']*'))?$" "$1" && die "В копии подозрительный файл ${1##*/} – не восстанавливаю."
+  return 0
+}
+
+# Меняет старый IP на новый в базе панели и файлах kit (только целиком, 1.2.3.4 не заденет 11.2.3.45).
+replace_host() { # старый новый файлы...
+  python3 - "$@" <<'PY'
+import re, sqlite3, sys
+old, new, files = sys.argv[1], sys.argv[2], sys.argv[3:]
+rx = re.compile(r"(?<![0-9.])" + re.escape(old) + r"(?![0-9])")
+sub = lambda v: rx.sub(new, v) if isinstance(v, str) else v
+db = sqlite3.connect("/etc/x-ui/x-ui.db")
+db.create_function("kit_sub", 1, sub)
+for table, cols in (("inbounds", ("settings", "stream_settings")), ("settings", ("value",))):
+    for c in cols:
+        db.execute("UPDATE %s SET %s = kit_sub(%s)" % (table, c, c))
+db.commit(); db.close()
+for f in files:
+    s = open(f).read()
+    open(f, "w").write(rx.sub(new, s))
+PY
+}
+
+restore_main() { # файл
+  local file=$1 tmp old_ip=""
+  [[ -f $file ]] || die "Нет файла $file. Сначала скопируйте копию на этот сервер: scp kit-backup-….tar.gz root@IP:"
+  [[ -d /usr/local/x-ui ]] && die "Восстанавливать можно только на чистый сервер, а здесь уже стоит 3X-UI."
+  port_busy 443 tcp && die "Порт 443/tcp занят. Восстанавливать нужно на чистый VPS."
+
+  say "Ставлю пакеты: curl, jq, openssl, qrencode, ufw, python3"
+  export DEBIAN_FRONTEND=noninteractive
+  wait_apt_idle
+  apt-get update -qq
+  apt-get install -y -qq curl jq openssl qrencode ca-certificates iproute2 ufw socat cron python3 python3-yaml >/dev/null
+
+  # Сначала проверяем архив целиком: только наши пути, только файлы и папки, без ссылок
+  # и «../». Чужой архив не должен ничего записать мимо.
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064 # путь подставляем сразу: при выходе локальной переменной уже нет
+  trap "rm -rf -- '$tmp'" EXIT
+  python3 - "$file" "$tmp" <<'PY' || die "Это не резервная копия 3X-UI KIT или она повреждена. Ничего не менял."
+import os, sys, tarfile
+allowed = ("etc/x-ui/x-ui.db", "etc/x-ui/install-result.env", "etc/kit/kit.env", "etc/kit-sub/config.json",
+           "etc/nginx/kit-stream.conf", "etc/nginx/conf.d/kit.conf", "var/www/kit", "root/cert/self",
+           "root/cert/custom", "root/3x-ui.txt", "kit-backup.env")
+parents = {"etc", "etc/x-ui", "etc/kit", "etc/kit-sub", "etc/nginx", "etc/nginx/conf.d", "var", "var/www", "root", "root/cert"}
+with tarfile.open(sys.argv[1], "r:gz") as t:
+    ms = []
+    for m in t.getmembers():
+        n = os.path.normpath(m.name)
+        if n == ".":
+            continue
+        if n.startswith("/") or ".." in n.split("/"):
+            sys.exit("путь " + m.name)
+        if not (m.isfile() or m.isdir()):
+            sys.exit("не файл " + m.name)
+        if not (n in parents and m.isdir()) and not any(n == a or n.startswith(a + "/") for a in allowed):
+            sys.exit("лишний " + m.name)
+        m.name = n
+        m.uid = m.gid = 0
+        m.uname = m.gname = "root"
+        m.mode = 0o700 if m.isdir() else 0o600
+        ms.append(m)
+    names = {m.name for m in ms}
+    for need in ("etc/x-ui/x-ui.db", "etc/x-ui/install-result.env", "kit-backup.env"):
+        if need not in names:
+            sys.exit("нет " + need)
+    if hasattr(tarfile, "data_filter"):
+        t.extractall(sys.argv[2], members=ms, filter="data")
+    else:
+        t.extractall(sys.argv[2], members=ms)
+PY
+  local f
+  for f in "$tmp/kit-backup.env" "$tmp/etc/x-ui/install-result.env" "$tmp/etc/kit/kit.env"; do if [[ -f $f ]]; then safe_env "$f"; fi; done
+  python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); assert c.execute('PRAGMA integrity_check').fetchone()[0]=='ok'; c.execute('SELECT count(*) FROM inbounds')" \
+    "$tmp/etc/x-ui/x-ui.db" 2>/dev/null || die "База панели в копии повреждена. Ничего не менял."
+
+  local BACKUP_HOST="" BACKUP_SSL="" BACKUP_DATE="" BACKUP_KIT_VERSION=""
+  # shellcheck disable=SC1090
+  . "$tmp/kit-backup.env"
+  [[ $BACKUP_SSL =~ ^(ip|custom|none)$ ]] || die "В копии нет данных о сертификате."
+  PANEL_SSL=$BACKUP_SSL
+  # Домен переезжает вместе с сервером (поменяйте A-запись), IP – нет.
+  if [[ $BACKUP_HOST =~ ^[0-9.]+$ ]]; then
+    HOST=${HOST:-$(public_ip)}
+    [[ -n $HOST ]] || die "Не удалось узнать внешний IP. Укажите его: --host 1.2.3.4"
+    [[ $HOST != "$BACKUP_HOST" ]] && old_ip=$BACKUP_HOST
+  else
+    HOST=$BACKUP_HOST
+  fi
+  # Свой домен (self-steal): берём из подключения REALITY в базе. Сертификат в копию не кладём,
+  # на новом сервере он выпускается заново, а для этого домен уже должен вести на новый IP.
+  DOMAIN=$(python3 - "$tmp/etc/x-ui/x-ui.db" 2>/dev/null <<'PY' || true
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+for (s,) in db.execute("SELECT stream_settings FROM inbounds WHERE remark = 'REALITY'"):
+    try:
+        r = json.loads(s)["realitySettings"]
+    except Exception:
+        continue
+    if r.get("target") == "127.0.0.1:10447" and r.get("serverNames"):
+        print(r["serverNames"][0])
+        break
+PY
+)
+  [[ $PANEL_SSL == ip || -n $DOMAIN ]] && port_busy 80 tcp && die "Для сертификата нужен свободный порт 80/tcp."
+  if [[ -n $DOMAIN ]]; then
+    [[ $DOMAIN =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die "В копии странное имя домена – не восстанавливаю."
+    domain_points_here "$DOMAIN" || die "Сервер в копии маскируется под домен $DOMAIN. Сначала направьте его A-запись на этот сервер, потом запустите восстановление снова. Ничего не менял."
+  fi
+  # Конфиги nginx и kit-sub из архива не берём, а собираем заново: из копии – только
+  # проверенные значения (путь подписки, порты, режим).
+  SINGLE=no; SUB_PATH=""; SUB_INTERNAL=""; SUB_PORT=""
+  if [[ -f $tmp/etc/kit/kit.env ]]; then
+    SINGLE=$(. "$tmp/etc/kit/kit.env"; echo "${SINGLE:-no}")
+    SUB_PATH=$(. "$tmp/etc/kit/kit.env"; echo "${SUB_PATH:-}")
+    SUB_INTERNAL=$(. "$tmp/etc/kit/kit.env"; echo "${SUB_INTERNAL:-}")
+    [[ $SINGLE =~ ^(yes|no)$ && $SUB_PATH =~ ^/[A-Za-z0-9_-]+/$ && $SUB_INTERNAL =~ ^[0-9]{1,5}$ ]] \
+      || die "В копии странные настройки kit (kit.env) – не восстанавливаю."
+  fi
+  if [[ -f $tmp/etc/kit-sub/config.json ]]; then
+    SUB_PORT=$(jq -r '.port' "$tmp/etc/kit-sub/config.json" 2>/dev/null || true)
+    [[ $SUB_PORT =~ ^[0-9]{1,5}$ && -n $SUB_PATH ]] || die "В копии странные настройки подписки – не восстанавливаю."
+  fi
+  say "Копия от ${BACKUP_DATE:-?} (kit ${BACKUP_KIT_VERSION:-?}), сервер ${B}$HOST${N}"
+
+  # 3X-UI той же закреплённой версии, потом подменяем её базу на базу из копии:
+  # подключения, ключи REALITY, пользователи и их подписки остаются прежними.
+  install_xui "$(free_port)" "$(rand_str 18)" "$(rand_str 10)" "$(rand_str 20)"
+  systemctl stop x-ui
+  install -m 600 "$tmp/etc/x-ui/x-ui.db" /etc/x-ui/x-ui.db
+  install -m 600 "$tmp/etc/x-ui/install-result.env" "$XUI_ENV"
+  local c
+  for c in self custom; do
+    [[ -d $tmp/root/cert/$c ]] || continue
+    install -d -m 700 "/root/cert/$c"
+    install -m 644 "$tmp/root/cert/$c/fullchain.pem" "/root/cert/$c/fullchain.pem"
+    install -m 600 "$tmp/root/cert/$c/privkey.pem" "/root/cert/$c/privkey.pem"
+  done
+  install -d -m 700 /etc/kit /etc/kit-sub
+  [[ -f $tmp/etc/kit/kit.env ]] && install -m 600 "$tmp/etc/kit/kit.env" /etc/kit/kit.env
+  [[ -f $tmp/root/3x-ui.txt ]] && install -m 600 "$tmp/root/3x-ui.txt" "$RESULT"
+  if [[ -n $old_ip ]]; then
+    say "Меняю адрес сервера в подключениях: $old_ip → $HOST"
+    local files=()
+    for f in "$XUI_ENV" /etc/kit/kit.env "$RESULT"; do if [[ -f $f ]]; then files+=("$f"); fi; done
+    replace_host "$old_ip" "$HOST" "${files[@]}"
+  fi
+  systemctl start x-ui
+  connect_panel
+  set_xray_core
+
+  # Сертификат: Let's Encrypt на новый IP выпустил установщик, свой и самоподписанный – из копии.
+  setup_tls_cert
+  TRUSTED=no
+  [[ $PANEL_SSL == ip || $PANEL_SSL == custom ]] && TRUSTED=yes
+  if [[ -n $SUB_PORT ]]; then
+    install_kit_sub
+    [[ $SINGLE == yes ]] || OPEN+=("$SUB_PORT/tcp")
+  fi
+  # Всё на 443: nginx строит маршруты по подключениям из базы, заглушка – из копии.
+  if [[ $SINGLE == yes ]]; then
+    [[ -n $DOMAIN ]] && { issue_domain_cert || domain_cert_fallback; }
+    install -d -m 755 /var/www/kit
+    [[ -f $tmp/var/www/kit/index.html ]] && install -m 644 "$tmp/var/www/kit/index.html" /var/www/kit/index.html
+    setup_nginx
+  fi
+
+  if [[ -f /etc/kit/kit.env ]]; then
+    install_kit_file
+    brand_xui_menu
+    /usr/local/bin/kit update --auto >/dev/null 2>&1 || warn "Автообновление не включилось – включите позже: kit update --auto"
+  fi
+
+  # Порты – по подключениям из копии: что слушает не только localhost, то и открываем.
+  if [[ $UFW == yes ]]; then
+    local p
+    while read -r p; do OPEN+=("$p"); done < <(api GET inbounds/list | jq -r '.[] | select(.listen != "127.0.0.1")
+      | if (.protocol | test("^(hysteria|hysteria2|tuic|wireguard|amneziawg)$")) then "\(.port)/udp"
+        elif .protocol == "shadowsocks" then "\(.port)/tcp", "\(.port)/udp" else "\(.port)/tcp" end')
+    [[ $TRUSTED == yes && $SINGLE == no ]] && OPEN+=("$XUI_PANEL_PORT/tcp")
+    [[ $PANEL_SSL == ip || -n $DOMAIN ]] && OPEN+=("80/tcp")
+    setup_ufw
+  fi
+
+  local n_in n_cl
+  n_in=$(api GET inbounds/list | jq length)
+  n_cl=$(api GET inbounds/list | jq '[.[] | (.settings | if type == "string" then fromjson else . end).clients // [] | .[].email] | unique | length')
+  kit_banner
+  echo
+  echo "${G}${B}Готово! Сервер восстановлен из копии: $n_in подключений, $n_cl клиентских записей.${N}"
+  echo "Логин и пароль панели прежние, адрес панели и подписки: ${B}cat $RESULT${N}"
+  echo
+  if [[ -n $old_ip ]]; then
+    warn "IP сервера сменился: $old_ip → $HOST."
+    echo "Старые подписки указывают на старый IP, поэтому клиентам нужно один раз добавить"
+    echo "подписку заново: ${B}kit user list${N}, затем ${B}kit user link имя${N}."
+    echo "${D}Чтобы в следующий раз переезд прошёл незаметно для клиентов, ставьте сервер на домен (--cert, --key, --host).${N}"
+  else
+    echo "Клиентам ничего менять не нужно: ключи, ссылки и подписки те же."
+  fi
+  [[ $PANEL_SSL == custom ]] && echo "Направьте A-запись домена ${B}$HOST${N} на IP этого сервера, если ещё не сделали."
+  return 0
+}
+
 usage() {
   cat <<EOF
 3X-UI со всеми протоколами одной командой
@@ -1423,6 +1638,7 @@ usage() {
                       тогда --host – это домен из сертификата
   --user admin        имя первого клиента
   --host 1.2.3.4      адрес в ссылке, если IP определился неверно
+  --restore файл      поднять сервер из резервной копии kit backup (на чистом VPS)
   --no-ufw            не трогать файрвол
   -y                  не задавать вопросов
 EOF
