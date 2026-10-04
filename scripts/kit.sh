@@ -830,9 +830,21 @@ check_system() {
   if ((${used:-0} >= 95)); then c_warn "диск заполнен на ${used}%"; else c_ok "место на диске: занято ${used:-?}%"; fi
 }
 
+# Заметность: известный сайт на чужом IP и запасные порты, которые на чужой заход отвечают пустой страницей.
+check_stealth() {
+  local id kind remark sni names list
+  while IFS=$'\t' read -r id kind remark sni; do
+    [[ $kind == reality && -n $sni && $sni =~ $SNI_BRAND_RE ]] || continue
+    same_net "$sni" || c_warn "$remark: $sni – известный сайт на чужом IP, это заметно. Надёжнее сосед по подсети: kit net site"
+  done < <(sni_targets 2>/dev/null || true)
+  list=$(api GET inbounds/list 2>/dev/null) || return 0
+  names=$(jq -r '[.[] | select(.enable == true and .listen != "127.0.0.1" and (.remark == "VLESS-WS" or .remark == "Trojan-gRPC" or .remark == "VMess-WS")) | .remark] | join(", ")' <<<"$list")
+  [[ -z $names ]] || c_warn "$names открыты на своих портах и на чужой заход отвечают пустой страницей. Не нужны? kit net off имя (режим «всё на 443» их прячет за сайтом)"
+}
+
 run_checks() {
   CHECK_BAD=0; CHECK_WARN=0; CHECK_FIX=()
-  check_services; check_versions; check_cert; check_exposure; check_subscription; check_masking; check_system
+  check_services; check_versions; check_cert; check_exposure; check_subscription; check_masking; check_stealth; check_system
 }
 
 # kit check --deep: подключения проверяются так, как это делает клиент, – с самого сервера.
