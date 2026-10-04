@@ -1544,6 +1544,8 @@ PY
   # подключения, ключи REALITY, пользователи и их подписки остаются прежними.
   install_xui "$(free_port)" "$(rand_str 18)" "$(rand_str 10)" "$(rand_str 20)"
   systemctl stop x-ui
+  # Служебные файлы WAL от базы, созданной установщиком, к базе из копии не подходят: с ними она «битая».
+  rm -f /etc/x-ui/x-ui.db-wal /etc/x-ui/x-ui.db-shm
   install -m 600 "$tmp/etc/x-ui/x-ui.db" /etc/x-ui/x-ui.db
   install -m 600 "$tmp/etc/x-ui/install-result.env" "$XUI_ENV"
   local c
@@ -1586,6 +1588,7 @@ PY
     install_kit_file
     brand_xui_menu
     /usr/local/bin/kit update --auto >/dev/null 2>&1 || warn "Автообновление не включилось – включите позже: kit update --auto"
+    /usr/local/bin/kit __limit-timer on >/dev/null 2>&1 || warn "Проверка общего лимита трафика не включилась – включите позже: kit fix"
   fi
 
   # Порты – по подключениям из копии: что слушает не только localhost, то и открываем.
