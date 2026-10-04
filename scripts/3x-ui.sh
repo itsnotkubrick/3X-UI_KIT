@@ -121,6 +121,9 @@ SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|d
 # Известные сайты на чужом IP заметны: сайт-прикрытие должен быть «своим» для подсети сервера.
 SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
 
+# Имена с «сомнительными» словами не берём: маскироваться под такой сайт неприятно и небезопасно для вас.
+SNI_BAD_RE='(probiv|porn|xxx|sex|adult|casino|bet|vpn|proxy|torrent|crack|hack|warez|drug|weapon|leak|escort|gambl|poker)'
+
 # У сайта настоящий сертификат: цепочка проходит проверку, имя совпадает.
 sni_trusted() {
   echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -verify_hostname "$1" -verify_return_error 2>/dev/null | grep -q 'Verification: OK'
@@ -176,7 +179,7 @@ nearby_sites() {
   for base in "$a.$b.$c" "$a.$b.$((c ^ 1))"; do
     names=$(nearby_scan "$base")
     for n in $names; do
-      [[ $n == "$me" || $n =~ $SNI_DYN_RE || $n =~ $SNI_BRAND_RE ]] && continue
+      [[ $n == "$me" || $n =~ $SNI_DYN_RE || $n =~ $SNI_BRAND_RE || $n =~ $SNI_BAD_RE ]] && continue
       if same_net "$n" && sni_alive "$n" && sni_trusted "$n" && sni_quality "$n"; then echo "$n"; found=$((found + 1)); ((found >= 8)) && return 0; fi
     done
     ((found > 0)) && return 0
@@ -543,6 +546,17 @@ main() {
     die "$SNI не отвечает по TLS 1.3 + HTTP/2 – REALITY с ним работать не будет. Выберите другой сайт."
   fi
   LINK_HOST=${DOMAIN:-$HOST}
+  # Режим «всё на 443»: XHTTP и MTProto различаются по имени сайта, берём и им соседей по подсети.
+  if [[ $TRUSTED == yes && $multi == no && ( -z $SNI2 || -z $SNI3 ) ]]; then
+    local -a nb2=()
+    echo
+    echo "Подбираю сайты для XHTTP и MTProto… (около минуты)"
+    mapfile -t nb2 < <(nearby_sites | shuf)
+    for s in "${nb2[@]}"; do
+      [[ $s == "$SNI" || $s == "$SNI2" || $s == "$SNI3" ]] && continue
+      if [[ -z $SNI2 ]]; then SNI2=$s; elif [[ -z $SNI3 ]]; then SNI3=$s; fi
+    done
+  fi
   # Для режима «всё на 443» XHTTP и MTProto нужны свои сайты: nginx различает их по SNI.
   for s in "${SNI_CANDIDATES[@]}"; do
     [[ $s == "$SNI" || $s == "$SNI2" || $s == "$SNI3" ]] && continue
@@ -550,6 +564,9 @@ main() {
     [[ -z $SNI3 && -n $SNI2 ]] && { SNI3=$s; break; }
   done
   SNI2=${SNI2:-$SNI}; SNI3=${SNI3:-www.cloudflare.com}
+  if [[ $TRUSTED == yes && $multi == no && ( $SNI2 =~ $SNI_BRAND_RE || $SNI3 =~ $SNI_BRAND_RE ) ]]; then
+    later "XHTTP и MTProto используют известные сайты из общего списка (достаточно соседей по подсети не нашлось). Заменить: kit net site"
+  fi
 
   step "Пакеты"
   export DEBIAN_FRONTEND=noninteractive
@@ -659,8 +676,18 @@ main() {
   fi
 
   step "Проверка"
-  if /usr/local/bin/kit check --deep >/dev/null 2>&1; then ok "подключения работают: REALITY и XHTTP проверены клиентом с самого сервера"
-  else later "kit check нашёл замечания – посмотрите: kit check --deep"; fi
+  local chk="" i bad=yes
+  for i in 1 2 3; do
+    sleep 4
+    chk=$(/usr/local/bin/kit check --deep 2>&1) && { bad=no; break; }
+  done
+  if [[ $bad == no ]]; then
+    ok "подключения работают: REALITY и XHTTP проверены клиентом с самого сервера"
+  else
+    install -m 600 /dev/null /var/log/kit-install-check.log
+    printf '%s\n' "$chk" >/var/log/kit-install-check.log
+    later "kit check нашёл: $(sed 's/\x1b\[[0-9;]*m//g' <<<"$chk" | grep -a -m1 '❌' | cut -c1-110). Подробности: kit check --deep"
+  fi
 
   # --- итог ---
   local panel_url links

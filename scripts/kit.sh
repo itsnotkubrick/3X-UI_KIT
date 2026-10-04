@@ -1196,6 +1196,9 @@ SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|d
 # Известные сайты на чужом IP заметны: сайт-прикрытие должен быть «своим» для подсети сервера.
 SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
 
+# Имена с «сомнительными» словами не берём: маскироваться под такой сайт неприятно и небезопасно для вас.
+SNI_BAD_RE='(probiv|porn|xxx|sex|adult|casino|bet|vpn|proxy|torrent|crack|hack|warez|drug|weapon|leak|escort|gambl|poker)'
+
 # У сайта настоящий сертификат: цепочка проходит проверку, имя совпадает.
 sni_trusted() {
   echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -verify_hostname "$1" -verify_return_error 2>/dev/null | grep -q 'Verification: OK'
@@ -1251,7 +1254,7 @@ nearby_sites() {
   for base in "$a.$b.$c" "$a.$b.$((c ^ 1))"; do
     names=$(nearby_scan "$base")
     for n in $names; do
-      [[ $n == "$me" || $n =~ $SNI_DYN_RE || $n =~ $SNI_BRAND_RE ]] && continue
+      [[ $n == "$me" || $n =~ $SNI_DYN_RE || $n =~ $SNI_BRAND_RE || $n =~ $SNI_BAD_RE ]] && continue
       if same_net "$n" && sni_alive "$n" && sni_trusted "$n" && sni_quality "$n"; then echo "$n"; found=$((found + 1)); ((found >= 8)) && return 0; fi
     done
     ((found > 0)) && return 0
@@ -1342,6 +1345,12 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
   echo "${B}Было → станет:${N}"
   for i in "${!ids[@]}"; do
     printf '  %-10s %-28s → %s%s\n' "${remarks[$i]}" "${olds[$i]}" "${news[$i]}" "$(same_net "${news[$i]}" && echo '  (из подсети сервера)')"
+  done
+  for i in "${!ids[@]}"; do
+    if [[ ${news[$i]} =~ $SNI_BRAND_RE ]] && ! same_net "${news[$i]}"; then
+      warn "Для ${remarks[$i]} в подсети не хватило сайтов – взят известный сайт из общего списка, он заметнее соседа. Лучше свой сайт: kit net site сайт.com"
+      break
+    fi
   done
   [[ $dry == no ]] || { echo "${D}(--dry-run: ничего не менял)${N}"; return 0; }
   if [[ -t 0 ]]; then
