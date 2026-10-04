@@ -135,6 +135,30 @@ def merge_awg(main_yaml, awg_yaml):
     return yaml.safe_dump(main, allow_unicode=True, sort_keys=False).encode()
 
 
+AUTO_GROUP = "Авто"
+
+
+def add_auto(clash_yaml):
+    """Группа «Авто» (url-test): клиент сам выбирает самый быстрый из рабочих протоколов и переключается,
+    когда один из них перестаёт отвечать. Ставится первой в выбор, поэтому берётся по умолчанию;
+    вручную по-прежнему можно выбрать любой протокол."""
+    cfg = yaml.safe_load(clash_yaml)
+    if not isinstance(cfg, dict):
+        return clash_yaml
+    names = [p["name"] for p in cfg.get("proxies") or [] if isinstance(p, dict) and p.get("name")]
+    groups = cfg.get("proxy-groups")
+    if len(names) < 2 or not isinstance(groups, list) or any(g.get("name") == AUTO_GROUP for g in groups if isinstance(g, dict)):
+        return clash_yaml
+    groups.insert(0, {"name": AUTO_GROUP, "type": "url-test", "url": "http://www.gstatic.com/generate_204",
+                      "interval": 300, "tolerance": 100, "lazy": True, "proxies": names})
+    for g in groups[1:]:
+        lst = g.get("proxies") if isinstance(g, dict) else None
+        if g.get("type") == "select" and isinstance(lst, list) and any(x in names for x in lst):
+            g["proxies"] = [AUTO_GROUP] + lst
+            break
+    return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False).encode()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "nginx"
     sys_version = ""
@@ -207,6 +231,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     body = merge_awg(body, abody)
             elif code == 200 and "text/plain" in headers.get("content-type", ""):
                 body = strip_links(body)
+            if code == 200 and clash and CONF.get("auto", True):
+                body = add_auto(body)
         except (yaml.YAMLError, UnicodeError) as e:
             log(f"не удалось обработать подписку: {e}")
 
