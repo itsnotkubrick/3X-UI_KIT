@@ -56,7 +56,7 @@ SNI_CANDIDATES=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com)
 ALL_PROTOS=(reality reality2 hy2 xhttp ws trojan vmess ss tuic wg awg awg3 mtproto)
 # Обычный WireGuard легко распознаётся сетевым оборудованием и работает нестабильно
 # (проверено 2026-09-27: рукопожатие доходит до сервера, ответ – нет). По умолчанию не ставим.
-DEFAULT_PROTOS=(reality reality2 hy2 xhttp ws trojan vmess ss tuic awg awg3 mtproto)
+DEFAULT_PROTOS=(reality hy2 xhttp ws trojan vmess ss tuic awg awg3 mtproto)
 declare -A PORTS=([xhttp]=8443 [ws]=2053 [trojan]=2083 [vmess]=2087 [ss]=8388 [tuic]=8444 [wg]=51820 [awg]=51821 [awg3]=51822 [mtproto]=8445)
 PROTOS=(); CREATED=(); OPEN=()
 # Режим «всё TCP на 443»: nginx разводит по SNI и путям, подключения слушают только localhost.
@@ -65,6 +65,7 @@ declare -A INNER=([reality]=10443 [xhttp]=10444 [mtproto]=10445 [web]=10446 [sel
 SNI2=""; SNI3=""
 # Свой домен (self-steal): REALITY маскируется под сайт на этом же сервере, а не под чужой.
 DOMAIN=""
+LINK_HOST=""   # адрес в ссылках: свой домен, если он выбран, иначе IP
 DOMAIN_CERT_DIR=/root/cert/domain
 SELF_IP_CERT=no   # yes – сертификат на IP самоподписанный (Let's Encrypt отказал, пользователь согласился)
 
@@ -73,8 +74,12 @@ if [[ -t 1 ]]; then
 else
   G=; Y=; R=; B=; D=; N=
 fi
-say()  { printf '%s\n' "${G}==>${N} $*"; }
-warn() { printf '%s\n' "${Y}!${N}  $*" >&2; }
+WARNINGS=(); STEP=0; STEPS=6
+say()  { printf '      %s\n' "$*"; }                                   # подробность под шагом
+ok()   { printf '      %s\n' "${G}✓${N} $*"; }
+step() { STEP=$((STEP + 1)); printf '\n%s\n' "${B}[$STEP/$STEPS]${N} $1"; }
+warn() { printf '%s\n' "${Y}!${N}  $*" >&2; }                          # сразу (диалоги, ошибки перед остановкой)
+later() { WARNINGS+=("$*"); }                                            # в блок «Внимание» в конце
 die()  { printf '%s\n' "${R}✗${N}  $*" >&2; exit 1; }
 trap 'die "Ошибка в строке $LINENO. Исправьте причину и запустите скрипт ещё раз."' ERR
 
@@ -105,6 +110,80 @@ sni_ok() {
     | grep -q 'ALPN protocol: h2'
 }
 
+sni_alive() { sni_ok "$1"; }
+
+# --- поиск сайта-прикрытия среди соседей по подсети (общий код kit и установщика) ---
+
+SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+
+# Бесплатные и динамические имена (sslip.io, work.gd и т. п.) любят чужие прокси-серверы: под них маскироваться не стоит.
+SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|myftp\.biz|dynu\.net|freeddns\.org|no-ip\.(org|biz|info)|nom\.za|tk|ml|ga|cf|gq)$'
+# Известные сайты на чужом IP заметны: сайт-прикрытие должен быть «своим» для подсети сервера.
+SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
+
+# У сайта настоящий сертификат: цепочка проходит проверку, имя совпадает.
+sni_trusted() {
+  echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -verify_hostname "$1" -verify_return_error 2>/dev/null | grep -q 'Verification: OK'
+}
+
+# На «/» отвечает страница (2xx) или переход на этот же сайт; не за Cloudflare, не переход на чужой сайт.
+sni_quality() {
+  local out code loc
+  out=$(curl -sS -m 10 -o /dev/null -D- "https://$1/" 2>/dev/null | tr -d '\r') || return 1
+  code=$(awk 'NR == 1 {print $2}' <<<"$out")
+  grep -qiE '^(server: cloudflare|cf-ray:)' <<<"$out" && return 1
+  case $code in
+    2??) return 0 ;;
+    3??) loc=$(awk 'tolower($1) == "location:" {print $2; exit}' <<<"$out"); [[ $loc == /* || $loc =~ ^https?://(www\.)?${1#www.}(/|:|$) ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+host_ip() { # IPv4 сервера
+  local h=${HOST:-}
+  if [[ $h =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then echo "$h"; else getent ahostsv4 "$h" 2>/dev/null | awk 'NR == 1 {print $1}'; fi
+}
+
+# Тот же блок /23 (две соседние /24), что и у сервера.
+same_net() { # имя
+  local me ip a b c x y z
+  me=$(host_ip); [[ -n $me ]] || return 1
+  IFS=. read -r a b c _ <<<"$me"
+  while read -r ip; do
+    [[ -n $ip ]] || continue
+    IFS=. read -r x y z _ <<<"$ip"
+    [[ $x == "$a" && $y == "$b" && $((z >> 1)) == $((c >> 1)) ]] && return 0
+  done < <(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u)
+  return 1
+}
+
+# Имена из сертификатов соседних адресов /24: заходим на 443 без имени и читаем subjectAltName.
+nearby_scan() { # основа "a.b.c"
+  local me; me=$(host_ip)
+  seq 1 254 | xargs -P 24 -I{} bash -c '
+      ip=$1; [ "$ip" = "$2" ] && exit 0
+      echo | timeout 4 openssl s_client -connect "$ip:443" -tls1_3 -alpn h2 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null \
+        | tr "," "\n" | sed -n "s/^ *DNS://p"' _ "$1.{}" "$me" 2>/dev/null | sort -u | grep -E "$SNI_RE" | head -40 || true
+}
+
+# Подходящие сайты: сначала в /24 сервера, если пусто – во втором /24 того же /23. До 8 имён.
+nearby_sites() {
+  local me a b c base n names found=0
+  set +e; trap - ERR   # выполняется в подпроцессе: сбой одной проверки не должен обрывать поиск
+  me=$(host_ip)
+  [[ $me =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 0
+  IFS=. read -r a b c _ <<<"$me"
+  for base in "$a.$b.$c" "$a.$b.$((c ^ 1))"; do
+    names=$(nearby_scan "$base")
+    for n in $names; do
+      [[ $n == "$me" || $n =~ $SNI_DYN_RE || $n =~ $SNI_BRAND_RE ]] && continue
+      if same_net "$n" && sni_alive "$n" && sni_trusted "$n" && sni_quality "$n"; then echo "$n"; found=$((found + 1)); ((found >= 8)) && return 0; fi
+    done
+    ((found > 0)) && return 0
+  done
+  return 0
+}
+
 # ---------- свой домен (self-steal) ----------
 
 # Домен должен смотреть на этот сервер: иначе Let's Encrypt не выдаст сертификат,
@@ -128,28 +207,30 @@ ask_tty() { # приглашение; ответ – в REPLY; не 0, если 
   read -r -p "$1" REPLY </dev/tty || { REPLY=""; return 1; }
 }
 
-# Вопрос пользователю: чужой сайт по умолчанию или свой домен. Без ответа – стандартный.
+# Вопрос пользователю: свой домен, сосед по подсети (по умолчанию) или свой сайт.
 choose_masking() {
   echo
   echo "${B}Под какой сайт маскировать сервер?${N}"
-  echo "Чтобы сервер не выделялся, он притворяется обычным сайтом. Имя этого сайта (SNI) видно"
-  echo "всем по пути, поэтому от выбора зависит, насколько трудно вас заметить."
+  echo "Со стороны он будет выглядеть как обычный сайт."
   echo
-  echo "  ${B}1)${N} Свой домен ${D}(рекомендуем, если он у вас есть)${N}"
-  echo "     Сервер притворяется вашим собственным сайтом: на нём настоящая страница и сертификат"
-  echo "     Let's Encrypt, а IP и имя совпадают. Нужно заранее: свой домен, его A-запись на IP этого"
-  echo "     сервера и свободный порт 80. Сертификат установщик получит сам."
-  echo "     ${D}Честно: сертификат домена попадает в публичные журналы сертификатов, поэтому связь${N}"
-  echo "     ${D}«домен – сервер» не скрыта. «Надёжнее» не значит «невидимо».${N}"
-  echo
-  echo "  ${B}2)${N} Стандартный сайт ${D}(если домена нет)${N}"
-  echo "     Сервер притворяется популярным сайтом (по умолчанию ${SNI_CANDIDATES[0]}). Ничего готовить"
-  echo "     не нужно, работает сразу. Минус: IP вашего сервера не принадлежит этому сайту,"
-  echo "     это можно заметить, и такой сервер может прожить недолго. Сменить сайт позже: kit sni rotate."
+  echo "  ${B}1${N}  Свой домен          самый надёжный: нужен домен и свободный порт 80"
+  echo "  ${B}2${N}  Сосед по подсети    подберу сам, домен не нужен   ${G}[рекомендуем]${N}"
+  echo "  ${B}3${N}  Свой сайт           вы вводите адрес сами"
+  echo "     ${D}Сертификат своего домена виден в публичных журналах сертификатов: связь «домен – сервер» не скрыта.${N}"
   echo
   local d="" prev=""
-  ask_tty "Ваш выбор [2]: " || return 0
+  ask_tty "Выбор [2]: " || return 0
   REPLY=${REPLY//[[:space:]]/}
+  if [[ ${REPLY%.} == 3 ]]; then
+    while :; do
+      ask_tty "Адрес сайта, например example.com (пусто – подобрать самому): " || return 0
+      d=${REPLY,,}; d=${d//[[:space:]]/}
+      [[ -n $d ]] || return 0
+      if [[ ! $d =~ $re_host ]]; then warn "Нужно только имя, без https://. Пример: example.com"; continue; fi
+      if sni_ok "$d"; then SNI=$d; return 0; fi
+      warn "$d не отвечает по TLS 1.3 и HTTP/2 – REALITY с ним работать не будет. Выберите другой."
+    done
+  fi
   [[ ${REPLY%.} == 1 ]] || { echo; return 0; }
   while :; do
     if [[ -n $prev ]]; then ask_tty "Ваш домен [$prev]: " || return 0
@@ -274,12 +355,8 @@ kit_banner() {
 ART
   printf '%s' "$N"
   echo
-  echo "${B}3X-UI KIT${N} на основе панели 3X-UI (MHSanaei/3x-ui), ядра Xray и mihomo"
-  echo
-  echo "  https://github.com/itsnotkubrick/3X-UI_KIT"
-  echo "  ${D}it's not Kubrick. it's just a VPN.${N}"
-  echo
-  echo "Ниже – данные для входа в панель и подключения."
+  echo "${B}3X-UI KIT $KIT_VERSION${N}  ·  it's not Kubrick. it's just a VPN."
+  echo "${D}на основе панели 3X-UI (MHSanaei/3x-ui), ядра Xray и mihomo · github.com/itsnotkubrick/3X-UI_KIT${N}"
 }
 
 main() {
@@ -384,7 +461,7 @@ main() {
   if [[ $PANEL_SSL == auto ]]; then
     if port_busy 80 tcp; then
       PANEL_SSL=none
-      warn "Порт 80 занят – сертификат для панели не получить. Панель будет доступна только через SSH-туннель."
+      later "Порт 80 занят – сертификат для панели не получить. Панель будет доступна только через SSH-туннель."
     else
       PANEL_SSL=ip
     fi
@@ -399,16 +476,36 @@ main() {
     install -m 600 "$ukey" /root/cert/custom/privkey.pem
   fi
 
-  say "Ставлю пакеты: curl, jq, openssl, qrencode, ufw"
-  export DEBIAN_FRONTEND=noninteractive
-  wait_apt_idle
-  apt-get update -qq
-  apt-get install -y -qq curl jq openssl qrencode ca-certificates iproute2 ufw socat cron unzip >/dev/null
+  kit_banner
+  echo
+  echo "Поставлю панель 3X-UI и протоколы на этот сервер. Займёт 3–5 минут."
+  if ! command -v curl >/dev/null || ! command -v openssl >/dev/null; then
+    export DEBIAN_FRONTEND=noninteractive; wait_apt_idle
+    apt-get update -qq; apt-get install -y -qq curl openssl ca-certificates iproute2 >/dev/null
+  fi
 
+  local host_given=${HOST:+yes}
   HOST=${HOST:-$(public_ip)}
   [[ -n $HOST ]] || die "Не удалось узнать внешний IP. Укажите его: --host 1.2.3.4"
+  local os_name mem_gb
+  os_name=$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}")
+  mem_gb=$(awk '/MemTotal/ {printf "%.1f", $2 / 1048576}' /proc/meminfo 2>/dev/null || echo "?")
+  echo
+  echo "Сервер: ${B}$HOST${N} · $os_name · ${mem_gb} ГБ памяти"
+  # IP определился снаружи, а ссылки получат именно его: у части хостеров это не адрес самого сервера.
+  if [[ -z $host_given && $yes == no && -t 1 ]] && { : </dev/tty; } 2>/dev/null; then
+    ask_tty "Адрес в ссылках: $HOST. Верно? Enter – да, или введите другой IPv4: " || true
+    REPLY=${REPLY//[[:space:]]/}
+    if [[ -n $REPLY ]]; then
+      [[ $REPLY =~ ^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$ ]] || die "Нужен IPv4-адрес, например 203.0.113.10 (или запустите с --host)."
+      HOST=$REPLY
+    fi
+  fi
+  if [[ $HOST =~ ^[0-9.]+$ ]] && ! ip -4 -o addr show 2>/dev/null | grep -qw "$HOST"; then
+    later "Адрес $HOST не найден на сетевых интерфейсах сервера (бывает за NAT). Если ссылки не работают – запустите с --host и верным IP."
+  fi
 
-  # Маскировка: из флагов, по вопросу пользователю или стандартная.
+  # Маскировка: из флагов, по вопросу пользователю или автоматически (сосед по подсети).
   if [[ -n $DOMAIN ]]; then
     [[ $PANEL_SSL == ip ]] || die "Свой домен работает с сертификатом панели Let's Encrypt на IP: освободите порт 80 и не указывайте --cert, --key и --panel-ssl none (сертификат для домена установщик получит сам)."
     domain_points_here "$DOMAIN" || die "Исправьте A-запись домена и запустите скрипт снова (DNS обновляется от нескольких минут до нескольких часов)."
@@ -418,25 +515,51 @@ main() {
   if [[ -n $DOMAIN ]]; then
     SNI=$DOMAIN
   elif [[ -z $SNI ]]; then
-    say "Выбираю сайт для маскировки REALITY"
-    warn "Маскировка под чужой сайт: IP сервера ему не принадлежит, это заметно. Надёжнее свой домен (--domain vpn.example.com) или сайт из подсети хостера (kit sni rotate --nearby)."
-    for s in "${SNI_CANDIDATES[@]}"; do
-      if sni_ok "$s"; then SNI=$s; break; fi
-    done
-    [[ -n $SNI ]] || die "Ни один сайт из списка не ответил по TLS 1.3 + HTTP/2. Укажите свой: --sni example.com"
+    echo
+    echo "Ищу сайт-прикрытие в подсети сервера… (около минуты)"
+    local -a nb=()
+    mapfile -t nb < <(nearby_sites | shuf)
+    if ((${#nb[@]})); then
+      SNI=${nb[0]}; SNI2=${nb[1]:-}; SNI3=${nb[2]:-}
+      ok "найден: ${B}$SNI${N} · та же подсеть · TLS 1.3, h2, сертификат верный"
+    else
+      warn "В подсети подходящего сайта не нашёл."
+      echo "   Лучший выход – свой домен: запустите снова с --domain vpn.example.com"
+      if [[ $yes == no && -t 1 ]] && { : </dev/tty; } 2>/dev/null; then
+        ask_tty "   Продолжить с запасным сайтом из списка? [y/N] " || true
+        [[ $REPLY =~ ^[yYдД]$ ]] || die "Остановился по вашей просьбе. Ставить можно снова в любой момент."
+      else
+        later "Сайт-прикрытие взят из общего списка (в подсети сервера подходящего не нашлось). Надёжнее свой домен или kit net site."
+      fi
+      local -a pool=()
+      mapfile -t pool < <(printf '%s\n' "${SNI_CANDIDATES[@]}" | shuf)
+      for s in "${pool[@]}"; do
+        if sni_ok "$s"; then SNI=$s; break; fi
+      done
+      [[ -n $SNI ]] || die "Ни один сайт из списка не ответил по TLS 1.3 + HTTP/2. Укажите свой: --sni example.com"
+      ok "запасной сайт: ${B}$SNI${N}"
+    fi
   elif ! sni_ok "$SNI"; then
     die "$SNI не отвечает по TLS 1.3 + HTTP/2 – REALITY с ним работать не будет. Выберите другой сайт."
   fi
-  say "Маскировка: ${B}$SNI${N}${DOMAIN:+ (свой домен)}"
+  LINK_HOST=${DOMAIN:-$HOST}
   # Для режима «всё на 443» XHTTP и MTProto нужны свои сайты: nginx различает их по SNI.
   for s in "${SNI_CANDIDATES[@]}"; do
-    [[ $s == "$SNI" ]] && continue
+    [[ $s == "$SNI" || $s == "$SNI2" || $s == "$SNI3" ]] && continue
     if [[ -z $SNI2 ]] && sni_ok "$s"; then SNI2=$s; continue; fi
     [[ -z $SNI3 && -n $SNI2 ]] && { SNI3=$s; break; }
   done
   SNI2=${SNI2:-$SNI}; SNI3=${SNI3:-www.cloudflare.com}
 
+  step "Пакеты"
+  export DEBIAN_FRONTEND=noninteractive
+  wait_apt_idle
+  apt-get update -qq
+  apt-get install -y -qq curl jq openssl qrencode ca-certificates iproute2 ufw socat cron unzip >/dev/null
+  ok "curl, jq, openssl, qrencode, ufw и другое"
+
   # --- официальный установщик 3X-UI с закреплённой версией ---
+  step "Панель 3X-UI $XUI_VERSION"
   local panel_port panel_path panel_user panel_pass
   panel_port=$(free_port)
   panel_path=$(rand_str 18)
@@ -451,6 +574,7 @@ main() {
 
   # Данные для входа – из файла, который пишет сам установщик.
   connect_panel
+  ok "панель установлена, установщик проверен по SHA256"
 
   if [[ $PANEL_SSL == custom ]]; then
     say "Подключаю ваш сертификат к панели"
@@ -467,7 +591,7 @@ main() {
     if [[ -n $DOMAIN ]]; then
       ip_cert_self_signed_fallback || die "Остановил установку по вашему выбору. Запустите скрипт снова без --domain (панель будет доступна через SSH-туннель) или позже, когда сертификат на IP снова можно будет получить."
     else
-      warn "Let's Encrypt не выдал сертификат на IP $HOST (порт 80 закрыт у хостера, лимит выпусков или сбой). Ставлю без него: панель будет доступна только через SSH-туннель."
+      later "Let's Encrypt не выдал сертификат на IP $HOST (порт 80 закрыт у хостера, лимит выпусков или сбой). Ставлю без него: панель будет доступна только через SSH-туннель."
       PANEL_SSL=none
       TRUSTED=no
     fi
@@ -484,19 +608,22 @@ main() {
   fi
 
   # --- ядро Xray, совместимое со всеми клиентами ---
+  step "Ядро Xray $XRAY_CORE и сертификат"
   set_xray_core
 
   # --- сертификат для протоколов с TLS ---
   setup_tls_cert
+  ok "ядро закреплено, сертификат для протоколов с TLS готов"
 
   # --- подключения: все выбранные протоколы, один subId на пользователя ---
+  step "Подключения"
   EXISTING=$(api GET inbounds/list)
   SUBID=""
   # «Всё на 443» – для новых установок с доверенным сертификатом. Старую многопортовую
   # установку не переделываем: перенос работающих подключений – осознанное решение.
   if [[ $TRUSTED == yes && $multi == no ]]; then
     if jq -e 'any(.[]; .remark == "REALITY" and (.listen // "") != "127.0.0.1")' <<<"$EXISTING" >/dev/null; then
-      warn "Установка уже работает в режиме с отдельными портами – оставляю его."
+      later "Установка уже работает в режиме с отдельными портами – оставляю его."
     else
       SINGLE=yes
     fi
@@ -514,12 +641,15 @@ main() {
   # --- подписка: ссылки, Clash/Mihomo и JSON с автоопределением клиента ---
   setup_subscription
   [[ $SINGLE == yes ]] && setup_nginx
+  ok "${#CREATED[@]} подключений, пользователь $NAME"
+
+  step "Защита и обновления"
   install_kit_cli
   brand_xui_menu
   # Автообновление kit и kit-sub: только подписанные релизы, выключается kit update --manual.
-  /usr/local/bin/kit update --auto >/dev/null 2>&1 || warn "Автообновление не включилось – включите позже: kit update --auto"
+  /usr/local/bin/kit update --auto >/dev/null 2>&1 || later "Автообновление не включилось – включите позже: kit update --auto"
   # Общий лимит трафика: у пользователя несколько записей (AmneziaWG считается отдельно), раз в 5 минут их трафик складывается.
-  /usr/local/bin/kit __limit-timer on >/dev/null 2>&1 || warn "Проверка общего лимита трафика не включилась – включите позже: kit fix"
+  /usr/local/bin/kit __limit-timer on >/dev/null 2>&1 || later "Проверка общего лимита трафика не включилась – включите позже: kit fix"
 
   # --- файрвол ---
   if [[ $UFW == yes ]]; then
@@ -527,6 +657,10 @@ main() {
     [[ $PANEL_SSL == ip ]] && OPEN+=("80/tcp")
     setup_ufw
   fi
+
+  step "Проверка"
+  if /usr/local/bin/kit check --deep >/dev/null 2>&1; then ok "подключения работают: REALITY и XHTTP проверены клиентом с самого сервера"
+  else later "kit check нашёл замечания – посмотрите: kit check --deep"; fi
 
   # --- итог ---
   local panel_url links
@@ -559,42 +693,57 @@ main() {
     echo "$links"
   } >"$RESULT"
 
-  kit_banner
   echo
-  echo "${G}${B}Готово! 3X-UI работает: ${#CREATED[@]} протоколов.${N}"
-  echo "${D}${CREATED[*]}${N}"
+  echo "${G}${B}Готово! Сервер работает.${N}"
   [[ -n $DOMAIN ]] && echo "Маскировка: свой домен ${B}$DOMAIN${N}, сертификат Let's Encrypt продлевается сам."
-  [[ $SELF_IP_CERT == yes ]] && echo "${Y}Сертификат на IP самоподписанный:${N} используйте ссылки на отдельные подключения из /root/3x-ui.txt, подписка в приложениях может не открыться."
+  [[ $SELF_IP_CERT == yes ]] && later "Сертификат на IP самоподписанный: пользуйтесь ссылками на отдельные подключения, подписка в приложениях может не открыться."
   echo
-  echo "Панель:  ${B}$panel_url${N}"
-  echo "Логин:   ${B}$XUI_USERNAME${N}"
-  echo "Пароль:  ${B}$XUI_PASSWORD${N}"
+  echo "${B}ПАНЕЛЬ${N}"
+  if [[ $TRUSTED == yes ]]; then
+    echo "  $panel_url"
+  else
+    echo "  Только через SSH-туннель. На вашем компьютере:"
+    echo "    ssh -L $XUI_PANEL_PORT:127.0.0.1:$XUI_PANEL_PORT root@$HOST"
+    echo "  Затем в браузере:  http://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH"
+  fi
+  echo "  Логин: ${B}$XUI_USERNAME${N}      Пароль: ${B}$XUI_PASSWORD${N}"
+  echo "  ${D}(сохранено в $RESULT, файл виден только root)${N}"
   echo
   if [[ $TRUSTED == yes ]]; then
-    echo "Подписка для ${B}$NAME${N} – все протоколы одной ссылкой. Вставьте её в Hiddify, v2rayN, Happ,"
-    echo "Clash Verge или FlClash: приложение само получит подходящий формат."
-    echo
-    echo "$SUB_URL"
-    echo
+    echo "${B}ПОДПИСКА${N} – одна ссылка для всех протоколов"
+    echo "  ${B}$SUB_URL${N}"
+    echo "  Вставьте в Happ, Hiddify, Karing, v2rayN, Clash Verge или FlClash."
     qrencode -t ANSIUTF8 -m 1 "$SUB_URL" || true
-    if [[ -n $AWG_LINKS ]]; then
-      echo
-      echo "AmneziaWG приходит по подписке в Clash Verge и FlClash; для AmneziaVPN – ссылки vpn:// в $RESULT."
-    fi
-  else
-    echo "Без сертификата подписка недоступна снаружи – вот ссылки по одной:"
     echo
-    echo "$links"
+    KIT_NO_QR=1 /usr/local/bin/kit __links "$NAME" "$SUBID" || true
+  else
+    /usr/local/bin/kit __links "$NAME" "$SUBID" || true
   fi
   echo
-  if [[ -n $PIN && " ${CREATED[*]} " == *" TUIC "* ]]; then
-    warn "TUIC со своим сертификатом: в клиенте включите «Разрешить небезопасный» (allow insecure) – отпечаток TUIC-ссылки не передают."
+  local main_list="" spare_list="" c
+  for c in "${CREATED[@]}"; do
+    case $c in REALITY | XHTTP | Hysteria2) main_list+="$c, " ;; *) spare_list+="$c, " ;; esac
+  done
+  echo "${B}ПРОТОКОЛЫ${N}"
+  echo "  Основные: ${main_list%, }"
+  echo "  Запасные: ${spare_list%, }"
+  echo "  Порты и выключение лишнего: ${B}kit net${N}"
+  if ((${#WARNINGS[@]})); then
+    echo
+    echo "${B}ВНИМАНИЕ${N}"
+    local w n=0
+    for w in "${WARNINGS[@]}"; do
+      n=$((n + 1)); ((n > 3)) && break
+      echo "  ${Y}!${N} $w"
+    done
+    ((${#WARNINGS[@]} > 3)) && echo "  … и ещё $((${#WARNINGS[@]} - 3)): kit check"
   fi
-  echo "Всё это сохранено в ${B}$RESULT${N}."
   echo
-  echo "Дополнительные пользователи – одной командой, сразу во все протоколы, со своей подпиской:"
-  echo "  ${B}kit user add sasha --gb 50 --days 30${N}"
-  echo "  ${B}kit user list${N}     – кто сколько израсходовал и до какого числа"
+  echo "${B}ДАЛЬШЕ${N}"
+  echo "  ${B}kit${N}                                  меню управления"
+  echo "  ${B}kit user add имя --gb 50 --days 30${N}   добавить пользователя"
+  echo "  ${B}kit check --deep${N}                     проверить, что всё работает"
+  echo "  ${B}kit backup${N}                           копия сервера (держите в надёжном месте)"
 }
 
 # Официальный установщик 3X-UI закреплённой версии, сверенный по SHA256.
@@ -683,7 +832,7 @@ set_xray_core() {
       xray_install_fallback
       cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
     fi
-    [[ $cur_core == "$XRAY_CORE" ]] || warn "Не удалось сменить ядро Xray (сейчас $cur_core). Клиенты на Mihomo и sing-box могут не подключиться."
+    [[ $cur_core == "$XRAY_CORE" ]] || later "Не удалось сменить ядро Xray (сейчас $cur_core). Клиенты на Mihomo и sing-box могут не подключиться."
   fi
 }
 
@@ -700,9 +849,9 @@ setup_ufw() {
   local ssh_port o
   ssh_port=$(ssh_ports)
   for o in ${ssh_port:-22}; do OPEN+=("$o/tcp"); done
-  say "Настраиваю ufw: ${OPEN[*]}"
+  ok "ufw: открыто ${#OPEN[@]} портов (${OPEN[*]}), панель не торчит наружу"
   for o in "${OPEN[@]}"; do ufw allow "$o" >/dev/null; done
-  ufw --force enable >/dev/null || warn "ufw не включился (так бывает в контейнерах) – откройте порты у хостера вручную."
+  ufw --force enable >/dev/null || later "ufw не включился (так бывает в контейнерах) – откройте порты у хостера вручную."
 }
 
 # ---------- сертификат ----------
@@ -767,7 +916,7 @@ add_inbound() {
   [[ $net == both ]] && nets="tcp udp"
   [[ $net == inner ]] && nets=tcp
   for n in $nets; do
-    if port_busy "$port" "$n"; then warn "$remark пропущен: порт $port/$n занят"; return; fi
+    if port_busy "$port" "$n"; then later "$remark пропущен: порт $port/$n занят"; return; fi
   done
   body=$(jq -nc --arg rm "$remark" --argjson port "$port" --arg p "$protocol" --arg s "$settings" --arg st "$stream" --arg l "$listen" '{
     remark: $rm, enable: true, listen: $l, port: $port, protocol: $p, settings: $s, streamSettings: $st,
@@ -797,7 +946,7 @@ open_port() { # port net
 ext_proxy() { # forceTls(same|tls) alpn(JSON)
   local sni=""
   [[ $HOST =~ ^[0-9.]+$ ]] || sni=$HOST
-  jq -nc --arg f "$1" --arg h "$HOST" --arg sni "$sni" --argjson alpn "${2:-null}" '[{forceTls: $f, dest: $h, port: 443, remark: ""}
+  jq -nc --arg f "$1" --arg h "$HOST" --arg lh "${LINK_HOST:-$HOST}" --arg sni "$sni" --argjson alpn "${2:-null}" '[{forceTls: $f, dest: (if $f == "same" then $lh else $h end), port: 443, remark: ""}
     + (if $f == "tls" then {fingerprint: "chrome", alpn: $alpn} + (if $sni != "" then {sni: $sni} else {} end) else {} end)]'
 }
 
@@ -974,7 +1123,7 @@ telegram_reachable() {
 proto_mtproto() {
   # MTProto бесполезен, если сам сервер не достаёт до Telegram (некоторые хостеры его блокируют).
   if ! telegram_reachable; then
-    warn "MTProto пропущен: с этого сервера недоступны серверы Telegram – прокси для Telegram здесь работать не будет."
+    later "MTProto пропущен: с этого сервера недоступны серверы Telegram – прокси для Telegram здесь работать не будет."
     return
   fi
   local settings
@@ -1047,6 +1196,7 @@ install_kit_cli() {
   install -d -m 700 /etc/kit
   {
     printf 'HOST=%q\n' "$HOST"
+    printf 'LINK_HOST=%q\n' "${LINK_HOST:-$HOST}"
     printf 'SUB_BASE=%q\n' "${SUB_URL%$SUBID}"
     printf 'SUB_PATH=%q\n' "$SUB_PATH"
     printf 'SUB_INTERNAL=%q\n' "${SUB_INTERNAL:-$SUB_PORT}"
@@ -1094,8 +1244,8 @@ stub_site() {
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Welcome</title><style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f7f9;color:#1f2328}main{text-align:center;padding:24px}h1{font-weight:600;font-size:28px}p{color:#57606a}</style></head><body><main><h1>Site is under construction</h1><p>Please check back soon.</p></main></body></html>
 HTML
     ;;
-    2) cat <<'HTML'
-<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>html{color-scheme:light dark}body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to <a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at <a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>
+    2) cat <<HTML
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cumulo Developer Hub</title><style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f8fa;color:#1f2328}header{background:#0b3d5c;color:#fff;padding:40px 20px;text-align:center}h1{margin:0 0 6px;font-size:26px}p{margin:0;color:#b6d4e8}main{max-width:760px;margin:32px auto;padding:0 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}.c{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:18px}.c b{display:block;margin-bottom:6px}.c span{color:#656d76;font-size:14px}footer{text-align:center;color:#8c959f;font-size:13px;padding:24px}</style></head><body><header><h1>Cumulo Developer Hub</h1><p>Guides, SDKs and release notes</p></header><main><div class="c"><b>Documentation</b><span>Getting started, tutorials and API reference.</span></div><div class="c"><b>SDKs</b><span>Client libraries for Python, Go and JavaScript.</span></div><div class="c"><b>Release notes</b><span>What changed in the latest platform release.</span></div></main><footer>&copy; $year Cumulo Cloud</footer></body></html>
 HTML
     ;;
     3) cat <<HTML
@@ -1387,12 +1537,12 @@ install_kit_sub() {
   install_kit_sub_file
   if [[ $SINGLE == yes ]]; then
     # За nginx: слушаем только localhost, TLS снимает nginx на 443.
-    jq -n --arg path "$SUB_PATH" --argjson port "${INNER[sub]}" --arg up "http://127.0.0.1:$SUB_INTERNAL" --arg host "$HOST" \
-      '{listen: "127.0.0.1", port: $port, path: $path, upstream: $up, host: $host}' >/etc/kit-sub/config.json
+    jq -n --arg path "$SUB_PATH" --argjson port "${INNER[sub]}" --arg up "http://127.0.0.1:$SUB_INTERNAL" --arg host "$HOST" --arg lh "${LINK_HOST:-$HOST}" \
+      '{listen: "127.0.0.1", port: $port, path: $path, upstream: $up, host: $host} + (if $lh != $host then {link_host: $lh} else {} end)' >/etc/kit-sub/config.json
   else
     jq -n --arg path "$SUB_PATH" --argjson port "$SUB_PORT" --arg up "http://127.0.0.1:$SUB_INTERNAL" \
-      --arg cert "$CERT" --arg key "$KEY" --arg host "$HOST" \
-      '{listen: "0.0.0.0", port: $port, path: $path, upstream: $up, cert: $cert, key: $key, host: $host}' >/etc/kit-sub/config.json
+      --arg cert "$CERT" --arg key "$KEY" --arg host "$HOST" --arg lh "${LINK_HOST:-$HOST}" \
+      '{listen: "0.0.0.0", port: $port, path: $path, upstream: $up, cert: $cert, key: $key, host: $host} + (if $lh != $host then {link_host: $lh} else {} end)' >/etc/kit-sub/config.json
   fi
   chmod 600 /etc/kit-sub/config.json
   if [[ $SINGLE == yes ]]; then
@@ -1420,7 +1570,7 @@ sub_links() {
   [[ -z ${SUB_INTERNAL:-} && $TRUSTED == yes ]] && scheme=https
   for i in $(seq 1 "$tries"); do
     # Настоящий адрес в Host – 3X-UI подставит его в ссылки.
-    raw=$(curl -fsSk -m 10 -A "v2rayN/7.0" -H "Host: $HOST:$SUB_PORT" "$scheme://127.0.0.1:$port$SUB_PATH$id" 2>/dev/null) && [[ -n $raw ]] && break
+    raw=$(curl -fsSk -m 10 -A "v2rayN/7.0" -H "Host: ${LINK_HOST:-$HOST}:$SUB_PORT" "$scheme://127.0.0.1:$port$SUB_PATH$id" 2>/dev/null) && [[ -n $raw ]] && break
     raw=""; sleep 2
   done
   if grep -q '://' <<<"$raw"; then echo "$raw"; else base64 -d <<<"$raw" 2>/dev/null || true; fi
@@ -1603,8 +1753,8 @@ PY
   if [[ -f /etc/kit/kit.env ]]; then
     install_kit_file
     brand_xui_menu
-    /usr/local/bin/kit update --auto >/dev/null 2>&1 || warn "Автообновление не включилось – включите позже: kit update --auto"
-    /usr/local/bin/kit __limit-timer on >/dev/null 2>&1 || warn "Проверка общего лимита трафика не включилась – включите позже: kit fix"
+    /usr/local/bin/kit update --auto >/dev/null 2>&1 || later "Автообновление не включилось – включите позже: kit update --auto"
+    /usr/local/bin/kit __limit-timer on >/dev/null 2>&1 || later "Проверка общего лимита трафика не включилась – включите позже: kit fix"
   fi
 
   # Порты – по подключениям из копии: что слушает не только localhost, то и открываем.

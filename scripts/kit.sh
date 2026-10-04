@@ -122,7 +122,7 @@ collect_links() {
     raw=""
     # Внутренняя подписка отвечает по http (всё на 443) или по https (свой порт с сертификатом).
     for scheme in http https; do
-      raw=$(curl -fsSk -m 10 -A "v2rayN/7" -H "Host: $HOST" "$scheme://127.0.0.1:$SUB_INTERNAL$SUB_PATH$sid$suffix" 2>/dev/null) && [[ -n $raw ]] && break
+      raw=$(curl -fsSk -m 10 -A "v2rayN/7" -H "Host: ${LINK_HOST:-$HOST}" "$scheme://127.0.0.1:$SUB_INTERNAL$SUB_PATH$sid$suffix" 2>/dev/null) && [[ -n $raw ]] && break
       raw=""
     done
     grep -q '://' <<<"$raw" || raw=$(base64 -d <<<"$raw" 2>/dev/null || true)
@@ -1232,6 +1232,7 @@ nearby_scan() { # основа "a.b.c"
 # Подходящие сайты: сначала в /24 сервера, если пусто – во втором /24 того же /23. До 8 имён.
 nearby_sites() {
   local me a b c base n names found=0
+  set +e; trap - ERR   # выполняется в подпроцессе: сбой одной проверки не должен обрывать поиск
   me=$(host_ip)
   [[ $me =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 0
   IFS=. read -r a b c _ <<<"$me"
@@ -1513,7 +1514,7 @@ links_block() { # имя subId
   [[ -n $raw ]] || { echo "Отдельных ссылок нет."; return 0; }
   local script
   IFS= read -r -d '' script <<'PY' || true
-import base64, json, re, subprocess, shutil, sys
+import base64, json, os, re, subprocess, shutil, sys
 from urllib.parse import urlparse, parse_qs, unquote
 name = sys.argv[1]
 MAIN = ["REALITY", "XHTTP", "Hysteria2"]
@@ -1561,7 +1562,7 @@ for title, group in (("Основные", main), ("Запасные", spare)):
     print(title)
     for it in group:
         show(*it)
-        if not qr_done and it[0] == "REALITY" and shutil.which("qrencode"):
+        if not qr_done and it[0] == "REALITY" and shutil.which("qrencode") and not os.environ.get("KIT_NO_QR"):
             sys.stdout.flush()
             subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "1", it[4]])
             print()

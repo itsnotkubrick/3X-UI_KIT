@@ -211,7 +211,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not SUB_ID.match(sub_id):
             return self.send_plain(404, "404 page not found")
         ua = self.headers.get("User-Agent", "")
-        host = self.headers.get("Host", CONF.get("host", ""))
+        host = CONF.get("link_host") or self.headers.get("Host", CONF.get("host", ""))
         accept = self.headers.get("Accept", "")
         code, headers, body = upstream(sub_id, ua, host, accept)
         if code is None:
