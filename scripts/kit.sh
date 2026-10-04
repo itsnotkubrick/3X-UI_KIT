@@ -832,10 +832,71 @@ run_checks() {
   check_services; check_versions; check_cert; check_exposure; check_subscription; check_masking; check_system
 }
 
+# kit check --deep: подключения проверяются так, как это делает клиент, – с самого сервера.
+# Порты: каждое включённое подключение должно слушать. Сами подключения: настоящий клиент Xray ходит
+# через REALITY (TCP и XHTTP) на публичный адрес сервера и открывает страницу через него.
+deep_ports() {
+  local list name port
+  list=$(api GET inbounds/list 2>/dev/null) || { c_bad "" "не удалось получить подключения из панели"; return 0; }
+  while IFS=$'\t' read -r name port; do
+    if ss -Hlntu "sport = :$port" 2>/dev/null | grep -q .; then c_ok "$name: порт $port слушает"
+    else c_bad "" "$name: порт $port не слушает (подключение включено, но сервис не открыл порт)"; fi
+  done < <(jq -r '.[] | select(.enable == true) | [.remark, .port] | @tsv' <<<"$list")
+}
+
+deep_client_config() { # ссылка vless:// порт-socks → конфиг клиента Xray (печатает JSON); не 0 – не REALITY
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+from urllib.parse import urlparse, parse_qs, unquote
+u = urlparse(sys.argv[1]); q = {k: v[0] for k, v in parse_qs(u.query).items()}
+if u.scheme != "vless" or q.get("security") != "reality":
+    sys.exit(1)
+net = q.get("type", "tcp")
+st = {"network": net, "security": "reality", "realitySettings": {
+    "serverName": q.get("sni", ""), "fingerprint": q.get("fp", "chrome"), "publicKey": q.get("pbk", ""),
+    "shortId": q.get("sid", ""), "spiderX": unquote(q.get("spx", "/"))}}
+if net == "xhttp":
+    st["xhttpSettings"] = {"path": unquote(q.get("path", "/")), "mode": q.get("mode", "auto")}
+user = {"id": u.username, "encryption": "none"}
+if q.get("flow"):
+    user["flow"] = q["flow"]
+print(json.dumps({"log": {"loglevel": "none"},
+    "inbounds": [{"listen": "127.0.0.1", "port": int(sys.argv[2]), "protocol": "socks", "settings": {"udp": False}}],
+    "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": u.hostname, "port": u.port, "users": [user]}]}, "streamSettings": st}]}))
+PY
+}
+
+deep_clients() {
+  local xray sid link name cfg port=18080 pid ok tmp
+  xray=$(ls /usr/local/x-ui/bin/xray-linux-* 2>/dev/null | head -1)
+  [[ -x $xray ]] || { c_warn "не нашёл Xray панели – подключения не проверил"; return 0; }
+  command -v python3 >/dev/null || { c_warn "нет python3 – подключения не проверил"; return 0; }
+  sid=$(clients 2>/dev/null | jq -r '[.[] | select(.enable == true and .subId != "") | .subId][0] // empty')
+  [[ -n $sid ]] || { c_info "нет включённых пользователей – проверять подключения нечем (kit user add имя)"; return 0; }
+  tmp=$(mktemp -d)
+  while IFS= read -r link; do
+    name=${link##*#}; name=${name%%-*}
+    port=$((port + 1)); cfg=$tmp/$port.json
+    deep_client_config "$link" "$port" >"$cfg" 2>/dev/null || continue
+    "$xray" run -c "$cfg" >/dev/null 2>&1 & pid=$!
+    sleep 2; ok=no
+    curl -fsS -m 20 --socks5-hostname "127.0.0.1:$port" -o /dev/null https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null && ok=yes
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    if [[ $ok == yes ]]; then c_ok "$name: клиент подключился к серверу и открыл страницу"
+    else c_bad "" "$name: клиент не смог подключиться и открыть страницу (проверьте kit sni, журнал: journalctl -u x-ui -n 30)"; fi
+  done < <(collect_links "$sid" '^vless://.*security=reality')
+  rm -rf "$tmp"
+  c_info "Проверка идёт с самого сервера: доступность из вашей сети она не покажет. Остальные протоколы проверены только по открытому порту."
+}
+
 cmd_check() {
+  local deep=no
+  [[ ${1:-} != --deep ]] || deep=yes
+  [[ -z ${1:-} || $deep == yes ]] || die "Команда: kit check [--deep]"
   echo "${B}kit check${N} – проверка сервера (ничего не меняет)"
   echo
   run_checks
+  if [[ $deep == yes ]]; then echo; echo "${B}Подключения${N}"; deep_ports; deep_clients; fi
   echo
   if ((CHECK_BAD == 0)); then
     echo "${G}${B}Всё в порядке.${N}$( ((CHECK_WARN)) && echo " Предупреждений: $CHECK_WARN." || true)"
@@ -1291,7 +1352,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
   kit update            обновить kit и подписку kit-sub сейчас (пользователи и ссылки не меняются)
   kit update --manual   выключить автообновление (--auto – включить обратно)
   kit backup            резервная копия сервера (подключения, ключи, пользователи)
-  kit check             проверить сервер: службы, сертификат, подписка, сайт маскировки, права
+  kit check [--deep]    проверить сервер: службы, сертификат, подписка, сайт маскировки, права; --deep – ещё и подключиться клиентом
   kit fix [--dry-run]   исправить безопасное: перезапустить службы, права, автообновление, сертификат
   kit sni               сайты маскировки; kit sni rotate [--nearby] [сайт] – сменить (--nearby – искать в подсети сервера)
   kit version           версия kit, панели и ядра
@@ -1316,7 +1377,7 @@ case "$cmd_key" in
   "sni rotate") shift 2; sni_rotate "$@" ;;
   "sni "*) [[ -z ${2:-} ]] || die "Команда: kit sni  или  kit sni rotate [--nearby] [--dry-run] [сайт]"; sni_show ;;
   "backup "*) cmd_backup ;;
-  "check "*) cmd_check ;;
+  "check "*) shift; cmd_check "$@" ;;
   "fix "*) shift; cmd_fix "$@" ;;
   "version "*|"--version "*|"-v "*) cmd_version ;;
   *) usage; update_hint ;;
