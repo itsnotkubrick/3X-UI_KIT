@@ -1110,6 +1110,14 @@ PY
 SNI_POOL=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com www.microsoft.com www.cloudflare.com)
 SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
 
+# Бесплатные и динамические имена (sslip.io, work.gd и т. п.) любят чужие прокси-серверы: под них маскироваться не стоит.
+SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|myftp\.biz|dynu\.net|freeddns\.org|no-ip\.(org|biz|info)|nom\.za|tk|ml|ga|cf|gq)$'
+
+# У сайта настоящий сертификат: цепочка проходит проверку, имя совпадает.
+sni_trusted() {
+  echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -verify_hostname "$1" -verify_return_error 2>/dev/null | grep -q 'Verification: OK'
+}
+
 host_ip() { # IPv4 сервера
   local h=${HOST:-}
   if [[ $h =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then echo "$h"; else getent ahostsv4 "$h" 2>/dev/null | awk 'NR == 1 {print $1}'; fi
@@ -1154,8 +1162,8 @@ nearby_sites() {
       echo | timeout 4 openssl s_client -connect "$ip:443" -tls1_3 -alpn h2 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null \
         | tr "," "\n" | sed -n "s/^ *DNS://p"' _ "$base.{}" "$me" 2>/dev/null | sort -u | grep -E "$SNI_RE" | head -40 || true)
   for n in $names; do
-    [[ $n == "$me" ]] && continue
-    if same_net "$n" && sni_alive "$n"; then echo "$n"; fi
+    [[ $n == "$me" || $n =~ $SNI_DYN_RE ]] && continue
+    if same_net "$n" && sni_alive "$n" && sni_trusted "$n"; then echo "$n"; fi
   done
 }
 
@@ -1259,6 +1267,7 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
   sleep 2
   systemctl is-active -q x-ui || warn "Панель не отвечает – проверьте: systemctl status x-ui"
   say "Готово. Сайт маскировки сменён."
+  [[ $nearby == no ]] || echo "Это чужие сайты из вашей подсети: откройте их в браузере и убедитесь, что на них нет ничего неприятного. Не подошли – kit sni rotate ещё раз."
   echo "Подписка у клиентов обновится сама при следующем обновлении подписки в приложении."
   echo "Ссылки REALITY, XHTTP и MTProto, сохранённые вручную, нужно заменить на новые: ${B}kit user link имя --all${N}"
 }
