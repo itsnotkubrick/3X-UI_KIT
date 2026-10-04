@@ -53,10 +53,10 @@ XUI_ENV=/etc/x-ui/install-result.env
 # Apple, iCloud, Microsoft и домены .ru сам Xray не советует – их тут нет.
 SNI_CANDIDATES=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com)
 
-ALL_PROTOS=(reality hy2 xhttp ws trojan vmess ss tuic wg awg awg3 mtproto)
+ALL_PROTOS=(reality reality2 hy2 xhttp ws trojan vmess ss tuic wg awg awg3 mtproto)
 # Обычный WireGuard легко распознаётся сетевым оборудованием и работает нестабильно
 # (проверено 2026-09-27: рукопожатие доходит до сервера, ответ – нет). По умолчанию не ставим.
-DEFAULT_PROTOS=(reality hy2 xhttp ws trojan vmess ss tuic awg awg3 mtproto)
+DEFAULT_PROTOS=(reality reality2 hy2 xhttp ws trojan vmess ss tuic awg awg3 mtproto)
 declare -A PORTS=([xhttp]=8443 [ws]=2053 [trojan]=2083 [vmess]=2087 [ss]=8388 [tuic]=8444 [wg]=51820 [awg]=51821 [awg3]=51822 [mtproto]=8445)
 PROTOS=(); CREATED=(); OPEN=()
 # Режим «всё TCP на 443»: nginx разводит по SNI и путям, подключения слушают только localhost.
@@ -817,6 +817,22 @@ proto_reality() {
   else
     add_inbound "REALITY" "$PORT" tcp vless "$settings" "$stream"
   fi
+}
+
+# Второй REALITY на высоком свободном порту, напрямую (без nginx). Где-то 443 и привычные порты
+# проходят хуже, чем высокий случайный; ключи, shortId и порт у него свои, сайт маскировки тот же.
+proto_reality2() {
+  local keys stream settings port
+  keys=$(api GET server/getNewX25519Cert)
+  settings=$(jq -nc --arg id "$(uuid)" --argjson c "$(client_base reality2)" '{clients: [$c + {id: $id, flow: "xtls-rprx-vision"}], decryption: "none", fallbacks: []}')
+  stream=$(jq -nc --arg sni "$SNI" --arg target "$(reality_target "$SNI")" --argjson k "$keys" --arg sid "$(openssl rand -hex 8)" '{
+    network: "tcp", security: "reality", externalProxy: [],
+    realitySettings: {show: false, xver: 0, target: $target, serverNames: [$sni], privateKey: $k.privateKey,
+      minClientVer: "", maxClientVer: "", maxTimediff: 0, shortIds: [$sid],
+      settings: {publicKey: $k.publicKey, fingerprint: "chrome", serverName: "", spiderX: "/"}},
+    tcpSettings: {acceptProxyProtocol: false, header: {type: "none"}}}')
+  port=$(free_port)
+  add_inbound "REALITY-2" "$port" tcp vless "$settings" "$stream"
 }
 
 proto_xhttp() {
@@ -1627,7 +1643,7 @@ usage() {
 3X-UI со всеми протоколами одной командой
 
   --protocols all     all (по умолчанию – всё, кроме WireGuard), minimal (только REALITY)
-                      или список через запятую: reality,hy2,xhttp,ws,trojan,vmess,ss,tuic,wg,awg,awg3,mtproto
+                      или список через запятую: reality,reality2,hy2,xhttp,ws,trojan,vmess,ss,tuic,wg,awg,awg3,mtproto
                       (обычный WireGuard работает нестабильно – включайте его, только если сервер и
                       пользователи за границей)
   --port 443          порт REALITY (TCP) и Hysteria2 (UDP), по умолчанию 443

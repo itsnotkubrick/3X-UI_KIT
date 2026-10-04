@@ -875,7 +875,8 @@ deep_clients() {
   [[ -n $sid ]] || { c_info "нет включённых пользователей – проверять подключения нечем (kit user add имя)"; return 0; }
   tmp=$(mktemp -d)
   while IFS= read -r link; do
-    name=${link##*#}; name=${name%%-*}
+    name=${link#*@}; name=${name%%\?*}; name=${name##*:}
+    if [[ $link == *type=xhttp* ]]; then name="XHTTP (порт $name)"; else name="REALITY (порт $name)"; fi
     port=$((port + 1)); cfg=$tmp/$port.json
     deep_client_config "$link" "$port" >"$cfg" 2>/dev/null || continue
     "$xray" run -c "$cfg" >/dev/null 2>&1 & pid=$!
@@ -1406,6 +1407,55 @@ port_ufw() { # allow|delete порт tcp|udp|both
   else ufw delete allow "$p/$n" >/dev/null 2>&1 || true; fi
 }
 
+# ---------- второй REALITY на высоком порту: kit reality add ----------
+
+reality_add() { # [порт]
+  local want=${1:-} list base id port="" keys sid settings stream body c n=0 tries bid
+  [[ -z $want || $want =~ ^[0-9]{1,5}$ ]] || die "kit reality add [порт], например: kit reality add 24443"
+  list=$(api GET inbounds/list)
+  jq -e 'any(.[]; .remark == "REALITY-2")' <<<"$list" >/dev/null && die "REALITY-2 уже есть. Порт: kit port, смена: kit port set REALITY-2 порт"
+  base=$(jq -c '[.[] | select(.remark == "REALITY")][0] // empty' <<<"$list")
+  [[ -n $base ]] || die "На сервере нет подключения REALITY, на которое можно опереться."
+  if [[ -n $want ]]; then
+    port=$((10#$want)); ((port >= 1024 && port <= 65535)) || die "Порт: число от 1024 до 65535."
+  else
+    for tries in $(seq 1 50); do
+      port=$(shuf -i 20000-60000 -n 1)
+      jq -e --argjson p "$port" 'any(.[]; .port == $p)' <<<"$list" >/dev/null && { port=""; continue; }
+      ss -Hlntu "sport = :$port" | grep -q . || break
+      port=""
+    done
+    [[ -n $port ]] || die "Не нашёл свободный порт."
+  fi
+  jq -e --argjson p "$port" 'any(.[]; .port == $p)' <<<"$list" >/dev/null && die "Порт $port уже занят другим подключением."
+  ss -Hlntu "sport = :$port" | grep -q . && die "Порт $port занят другой программой."
+  [[ $port != "${XUI_PANEL_PORT:-}" ]] || die "Порт $port – это панель."
+
+  keys=$(api GET server/getNewX25519Cert)
+  sid=$(openssl rand -hex 8)
+  settings=$(jq -nc '{clients: [], decryption: "none", fallbacks: []}')
+  # Сайт маскировки (или свой домен) – как у основного REALITY, ключи и shortId – свои.
+  stream=$(jq -c --argjson k "$keys" --arg sid "$sid" '(.streamSettings | if type == "string" then fromjson else . end)
+    | .externalProxy = [] | .tcpSettings.acceptProxyProtocol = false | .realitySettings.xver = 0
+    | .realitySettings.privateKey = $k.privateKey | .realitySettings.shortIds = [$sid]
+    | .realitySettings.settings.publicKey = $k.publicKey | del(.sockopt)' <<<"$base")
+  body=$(jq -nc --argjson port "$port" --arg s "$settings" --arg st "$stream" '{remark: "REALITY-2", enable: true, listen: "", port: $port, protocol: "vless",
+    settings: $s, streamSettings: $st, sniffing: "{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"metadataOnly\":false,\"routeOnly\":false}", expiryTime: 0, total: 0}')
+  api POST inbounds/add "$body" >/dev/null
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow "$port/tcp" >/dev/null; fi
+  id=$(api GET inbounds/list | jq -r '[.[] | select(.remark == "REALITY-2")][0].id')
+  [[ $id =~ ^[0-9]+$ ]] || die "Панель не создала REALITY-2."
+  # Тем же пользователям, что есть на основном REALITY (двойники AmneziaWG и Telegram не подключаются к нему).
+  bid=$(jq -r '.id' <<<"$base")
+  while read -r c; do
+    [[ -n $c ]] || continue
+    api POST "clients/$c/attach" "$(jq -nc --argjson i "$id" '{inboundIds: [$i]}')" >/dev/null && n=$((n + 1))
+  done < <(clients | jq -r --argjson b "$bid" '.[] | select((.inboundIds // []) | index($b)) | .email')
+  say "REALITY-2 создан на порту ${B}$port${N}, подключено пользователей: $n. Подписка у клиентов обновится сама."
+  echo "Если у хостера есть свой межсетевой экран (в личном кабинете), откройте в нём порт $port (tcp)."
+  echo "Проверить: ${B}kit check --deep${N}. Ссылки: ${B}kit user link имя --all${N}"
+}
+
 usage() {
   cat <<EOF
 ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
@@ -1428,6 +1478,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
   kit check [--deep]    проверить сервер: службы, сертификат, подписка, сайт маскировки, права; --deep – ещё и подключиться клиентом
   kit fix [--dry-run]   исправить безопасное: перезапустить службы, права, автообновление, сертификат
   kit port              порты подключений; kit port set имя порт – сменить (ufw и ссылки обновятся)
+  kit reality add [порт]  добавить второй REALITY на высоком порту (для сетей, где привычные порты проходят хуже)
   kit sni               сайты маскировки; kit sni rotate [--nearby] [сайт] – сменить (--nearby – искать в подсети сервера)
   kit version           версия kit, панели и ядра
 EOF
@@ -1448,6 +1499,7 @@ case "$cmd_key" in
   "panel update") shift 2; panel_update "$@" ;;
   "__limit-timer on") limit_timer_on ;;
   "update "*) shift; cmd_update "$@" ;;
+  "reality add") shift 2; reality_add "$@" ;;
   "port set") shift 2; port_set "$@" ;;
   "port "*) [[ -z ${2:-} ]] || die "Команда: kit port  или  kit port set имя порт"; port_show ;;
   "sni rotate") shift 2; sni_rotate "$@" ;;
