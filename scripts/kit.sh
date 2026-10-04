@@ -1174,14 +1174,32 @@ PY
 # ---------- сайт маскировки: kit sni ----------
 
 SNI_POOL=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com www.microsoft.com www.cloudflare.com)
+
+# --- поиск сайта-прикрытия среди соседей по подсети (общий код kit и установщика) ---
+
 SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
 
 # Бесплатные и динамические имена (sslip.io, work.gd и т. п.) любят чужие прокси-серверы: под них маскироваться не стоит.
 SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|myftp\.biz|dynu\.net|freeddns\.org|no-ip\.(org|biz|info)|nom\.za|tk|ml|ga|cf|gq)$'
+# Известные сайты на чужом IP заметны: сайт-прикрытие должен быть «своим» для подсети сервера.
+SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
 
 # У сайта настоящий сертификат: цепочка проходит проверку, имя совпадает.
 sni_trusted() {
   echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -verify_hostname "$1" -verify_return_error 2>/dev/null | grep -q 'Verification: OK'
+}
+
+# На «/» отвечает страница (2xx) или переход на этот же сайт; не за Cloudflare, не переход на чужой сайт.
+sni_quality() {
+  local out code loc
+  out=$(curl -sS -m 10 -o /dev/null -D- "https://$1/" 2>/dev/null | tr -d '\r') || return 1
+  code=$(awk 'NR == 1 {print $2}' <<<"$out")
+  grep -qiE '^(server: cloudflare|cf-ray:)' <<<"$out" && return 1
+  case $code in
+    2??) return 0 ;;
+    3??) loc=$(awk 'tolower($1) == "location:" {print $2; exit}' <<<"$out"); [[ $loc == /* || $loc =~ ^https?://(www\.)?${1#www.}(/|:|$) ]] ;;
+    *) return 1 ;;
+  esac
 }
 
 host_ip() { # IPv4 сервера
@@ -1189,11 +1207,43 @@ host_ip() { # IPv4 сервера
   if [[ $h =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then echo "$h"; else getent ahostsv4 "$h" 2>/dev/null | awk 'NR == 1 {print $1}'; fi
 }
 
-same_net() { # имя: есть ли у сайта адрес в той же /24, что у сервера
-  local me ip
+# Тот же блок /23 (две соседние /24), что и у сервера.
+same_net() { # имя
+  local me ip a b c x y z
   me=$(host_ip); [[ -n $me ]] || return 1
-  while read -r ip; do [[ -n $ip && ${ip%.*} == "${me%.*}" ]] && return 0; done < <(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u)
+  IFS=. read -r a b c _ <<<"$me"
+  while read -r ip; do
+    [[ -n $ip ]] || continue
+    IFS=. read -r x y z _ <<<"$ip"
+    [[ $x == "$a" && $y == "$b" && $((z >> 1)) == $((c >> 1)) ]] && return 0
+  done < <(getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u)
   return 1
+}
+
+# Имена из сертификатов соседних адресов /24: заходим на 443 без имени и читаем subjectAltName.
+nearby_scan() { # основа "a.b.c"
+  local me; me=$(host_ip)
+  seq 1 254 | xargs -P 24 -I{} bash -c '
+      ip=$1; [ "$ip" = "$2" ] && exit 0
+      echo | timeout 4 openssl s_client -connect "$ip:443" -tls1_3 -alpn h2 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null \
+        | tr "," "\n" | sed -n "s/^ *DNS://p"' _ "$1.{}" "$me" 2>/dev/null | sort -u | grep -E "$SNI_RE" | head -40 || true
+}
+
+# Подходящие сайты: сначала в /24 сервера, если пусто – во втором /24 того же /23. До 8 имён.
+nearby_sites() {
+  local me a b c base n names found=0
+  me=$(host_ip)
+  [[ $me =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 0
+  IFS=. read -r a b c _ <<<"$me"
+  for base in "$a.$b.$c" "$a.$b.$((c ^ 1))"; do
+    names=$(nearby_scan "$base")
+    for n in $names; do
+      [[ $n == "$me" || $n =~ $SNI_DYN_RE || $n =~ $SNI_BRAND_RE ]] && continue
+      if same_net "$n" && sni_alive "$n" && sni_trusted "$n" && sni_quality "$n"; then echo "$n"; found=$((found + 1)); ((found >= 8)) && return 0; fi
+    done
+    ((found > 0)) && return 0
+  done
+  return 0
 }
 
 # Подключения, у которых есть сайт маскировки: id, вид (reality, mtproto, self – свой домен), название, сайт.
@@ -1214,23 +1264,6 @@ sni_body() { # id вид новый-сайт → тело для inbounds/update
     | (if $k == "mtproto" then ($c | .fakeTlsDomain = $n) else $c end) as $c2
     | {id, remark, enable, listen, port, protocol, expiryTime, total, settings: ($c2 | tojson), streamSettings: ($s2 | tojson),
        sniffing: (.sniffing | if type == "string" then . else tojson end)}'
-}
-
-# Сайты из подсети сервера (/24): заходим на соседние адреса по 443 без имени, читаем имена из сертификата,
-# оставляем те, чьё имя указывает в эту же подсеть и отвечает по TLS 1.3 + HTTP/2.
-nearby_sites() {
-  local me base names n
-  me=$(host_ip)
-  [[ $me =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "Не удалось определить IPv4 сервера для поиска соседей."
-  base=${me%.*}
-  names=$(seq 1 254 | xargs -P 24 -I{} bash -c '
-      ip=$1; [ "$ip" = "$2" ] && exit 0
-      echo | timeout 4 openssl s_client -connect "$ip:443" -tls1_3 -alpn h2 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null \
-        | tr "," "\n" | sed -n "s/^ *DNS://p"' _ "$base.{}" "$me" 2>/dev/null | sort -u | grep -E "$SNI_RE" | head -40 || true)
-  for n in $names; do
-    [[ $n == "$me" || $n =~ $SNI_DYN_RE ]] && continue
-    if same_net "$n" && sni_alive "$n" && sni_trusted "$n"; then echo "$n"; fi
-  done
 }
 
 sni_show() {
@@ -1270,7 +1303,14 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
   if [[ $nearby == yes ]]; then
     say "Ищу сайты в подсети сервера (около 250 коротких подключений к порту 443 соседних адресов)"
     while read -r a; do [[ -n $a ]] && pool+=("$a"); done < <(nearby_sites)
-    ((${#pool[@]})) || warn "В подсети подходящих сайтов не нашёл, возьму из обычного списка."
+    if ((${#pool[@]} == 0)); then
+      warn "В подсети подходящего сайта не нашёл. Известный сайт на чужом IP заметнее остальных."
+      echo "  Лучший выход – свой домен (установка с --domain) или свой сайт: kit net site сайт.com"
+      if [[ -t 0 ]]; then
+        ask_tty "  Взять запасной сайт из списка? [y/N] "
+        [[ $REPLY =~ ^[yYдД]$ ]] || { echo "Отменено."; return 0; }
+      fi
+    fi
   fi
   pool+=("${SNI_POOL[@]}")
 
@@ -1291,6 +1331,10 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
     printf '  %-10s %-28s → %s%s\n' "${remarks[$i]}" "${olds[$i]}" "${news[$i]}" "$(same_net "${news[$i]}" && echo '  (из подсети сервера)')"
   done
   [[ $dry == no ]] || { echo "${D}(--dry-run: ничего не менял)${N}"; return 0; }
+  if [[ -t 0 ]]; then
+    ask_tty "Применить? [Y/n] "
+    [[ ! $REPLY =~ ^[nNнН]$ ]] || { echo "Отменено."; return 0; }
+  fi
 
   local bak=/root/x-ui-before-sni-$(date +%Y%m%d-%H%M%S).db
   install -m 600 /dev/null "$bak"; cat /etc/x-ui/x-ui.db >"$bak"
