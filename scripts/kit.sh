@@ -1333,6 +1333,79 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
   echo "Ссылки REALITY, XHTTP и MTProto, сохранённые вручную, нужно заменить на новые: ${B}kit user link имя --all${N}"
 }
 
+# ---------- порты подключений: kit port ----------
+
+port_net() { # protocol → tcp|udp|both
+  case $1 in
+    hysteria | hysteria2 | tuic | wireguard | amneziawg) echo udp ;;
+    shadowsocks) echo both ;;
+    *) echo tcp ;;
+  esac
+}
+
+port_show() {
+  local list
+  list=$(api GET inbounds/list)
+  say "Порты подключений"
+  jq -r '.[] | [.remark, .port, .protocol, .listen] | @tsv' <<<"$list" | while IFS=$'\t' read -r name port proto listen; do
+    if [[ $listen == 127.0.0.1 ]]; then printf '  %-14s %-6s %s\n' "$name" "$port" "внутренний (за nginx на 443)"
+    else printf '  %-14s %-6s %s\n' "$name" "$port" "$(port_net "$proto")"; fi
+  done
+  echo
+  echo "Сменить: ${B}kit port set имя порт${N}, например: kit port set REALITY 8443"
+}
+
+port_set() { # имя порт
+  local name=${1:-} new=${2:-} list row id old proto listen net body
+  [[ -n $name && $new =~ ^[0-9]{1,5}$ ]] || die "kit port set имя порт, например: kit port set REALITY 8443"
+  new=$((10#$new)); ((new >= 1 && new <= 65535)) || die "Порт: число от 1 до 65535."
+  list=$(api GET inbounds/list)
+  row=$(jq -c --arg n "${name,,}" '[.[] | select((.remark | ascii_downcase) == $n)][0] // empty' <<<"$list")
+  [[ -n $row ]] || die "Нет подключения «$name». Список: kit port"
+  id=$(jq -r '.id' <<<"$row"); old=$(jq -r '.port' <<<"$row"); proto=$(jq -r '.protocol' <<<"$row"); listen=$(jq -r '.listen' <<<"$row")
+  [[ $listen != 127.0.0.1 ]] || die "$name работает за nginx на внутреннем порту, снаружи это 443: менять нечего (режим «всё на 443»)."
+  [[ $new != "$old" ]] || die "$name уже на порту $new."
+  case $new in 22 | 80) die "Порт $new занят под SSH или проверку сертификата – выберите другой." ;; esac
+  [[ $new != "${XUI_PANEL_PORT:-}" ]] || die "Порт $new – это панель."
+  net=$(port_net "$proto")
+  # TCP и UDP на одном номере не конфликтуют (REALITY по tcp и Hysteria2 по udp делят 443).
+  local on op opr oid
+  while IFS=$'\t' read -r oid op opr; do
+    [[ $oid != "$id" && $op == "$new" ]] || continue
+    on=$(port_net "$opr")
+    [[ $on == both || $net == both || $on == "$net" ]] && die "Порт $new/$on уже занят другим подключением."
+  done < <(jq -r '.[] | [.id, .port, .protocol] | @tsv' <<<"$list")
+  case $net in
+    tcp) ss -Hltn "sport = :$new" | grep -q . && die "Порт $new/tcp занят другой программой." ;;
+    udp) ss -Hlun "sport = :$new" | grep -q . && die "Порт $new/udp занят другой программой." ;;
+    both) { ss -Hltn "sport = :$new"; ss -Hlun "sport = :$new"; } | grep -q . && die "Порт $new занят другой программой." ;;
+  esac
+  body=$(jq -c --argjson p "$new" '{id, remark, enable, listen, port: $p, protocol, expiryTime, total, settings: (.settings | if type == "string" then . else tojson end),
+    streamSettings: (.streamSettings | if type == "string" then . else tojson end), sniffing: (.sniffing | if type == "string" then . else tojson end)}' <<<"$row")
+  local ufw_on=no
+  command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active' && ufw_on=yes
+  [[ $ufw_on == no ]] || port_ufw allow "$new" "$net"
+  if ! (api POST "inbounds/update/$id" "$body" >/dev/null); then
+    [[ $ufw_on == no ]] || port_ufw delete "$new" "$net"
+    die "Панель не приняла новый порт. Ничего не изменилось."
+  fi
+  [[ $ufw_on == no ]] || port_ufw delete "$old" "$net"
+  sleep 2
+  if ss -Hlntu "sport = :$new" 2>/dev/null | grep -q .; then say "$name теперь на порту ${B}$new${N} (был $old)."
+  else warn "$name переведён на порт $new, но он пока не слушает: проверьте kit check --deep."; fi
+  echo "Подписка обновит ссылки сама. Сохранённые вручную ссылки на $name нужно заменить: ${B}kit user link имя --all${N}"
+  echo "Если у хостера есть свой межсетевой экран (в личном кабинете), откройте в нём порт $new ($net) и закройте $old."
+}
+
+port_ufw() { # allow|delete порт tcp|udp|both
+  local act=$1 p=$2 n=$3
+  if [[ $n == both ]]; then
+    if [[ $act == allow ]]; then ufw allow "$p/tcp" >/dev/null; ufw allow "$p/udp" >/dev/null
+    else ufw delete allow "$p/tcp" >/dev/null 2>&1 || true; ufw delete allow "$p/udp" >/dev/null 2>&1 || true; fi
+  elif [[ $act == allow ]]; then ufw allow "$p/$n" >/dev/null
+  else ufw delete allow "$p/$n" >/dev/null 2>&1 || true; fi
+}
+
 usage() {
   cat <<EOF
 ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
@@ -1354,6 +1427,7 @@ ${B}kit${N} $KIT_VERSION – управление сервером 3X-UI KIT
   kit backup            резервная копия сервера (подключения, ключи, пользователи)
   kit check [--deep]    проверить сервер: службы, сертификат, подписка, сайт маскировки, права; --deep – ещё и подключиться клиентом
   kit fix [--dry-run]   исправить безопасное: перезапустить службы, права, автообновление, сертификат
+  kit port              порты подключений; kit port set имя порт – сменить (ufw и ссылки обновятся)
   kit sni               сайты маскировки; kit sni rotate [--nearby] [сайт] – сменить (--nearby – искать в подсети сервера)
   kit version           версия kit, панели и ядра
 EOF
@@ -1374,6 +1448,8 @@ case "$cmd_key" in
   "panel update") shift 2; panel_update "$@" ;;
   "__limit-timer on") limit_timer_on ;;
   "update "*) shift; cmd_update "$@" ;;
+  "port set") shift 2; port_set "$@" ;;
+  "port "*) [[ -z ${2:-} ]] || die "Команда: kit port  или  kit port set имя порт"; port_show ;;
   "sni rotate") shift 2; sni_rotate "$@" ;;
   "sni "*) [[ -z ${2:-} ]] || die "Команда: kit sni  или  kit sni rotate [--nearby] [--dry-run] [сайт]"; sni_show ;;
   "backup "*) cmd_backup ;;
