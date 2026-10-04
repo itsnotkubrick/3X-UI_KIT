@@ -838,6 +838,9 @@ check_stealth() {
     same_net "$sni" || c_warn "$remark: $sni – известный сайт на чужом IP, это заметно. Надёжнее сосед по подсети: kit net site"
   done < <(sni_targets 2>/dev/null || true)
   list=$(api GET inbounds/list 2>/dev/null) || return 0
+  if jq -e 'any(.[]; .protocol == "hysteria" and .enable == true)' <<<"$list" >/dev/null && [[ -z $(hy_masq_state) ]]; then
+    c_warn "Hysteria2 на чужой HTTP/3-запрос отвечает не как сайт. Включить: kit net masq on"
+  fi
   names=$(jq -r '[.[] | select(.enable == true and .listen != "127.0.0.1" and (.remark == "VLESS-WS" or .remark == "Trojan-gRPC" or .remark == "VMess-WS")) | .remark] | join(", ")' <<<"$list")
   [[ -z $names ]] || c_warn "$names открыты на своих портах и на чужой заход отвечают пустой страницей. Не нужны? kit net off имя (режим «всё на 443» их прячет за сайтом)"
 }
@@ -859,11 +862,31 @@ deep_ports() {
   done < <(jq -r '.[] | select(.enable == true) | [.remark, .port] | @tsv' <<<"$list")
 }
 
-deep_client_config() { # ссылка vless:// порт-socks → конфиг клиента Xray (печатает JSON); не 0 – не REALITY
-  python3 - "$1" "$2" <<'PY'
+# Отпечаток сертификата Hysteria2 из самого подключения: в ссылке его может не быть (сертификат Let's Encrypt или свой).
+deep_hy_pin() {
+  local f
+  f=$(api GET inbounds/list 2>/dev/null | jq -r '[.[] | select(.protocol == "hysteria")][0] | (.streamSettings | if type == "string" then fromjson else . end).tlsSettings.certificates[0].certificateFile // empty' 2>/dev/null || true)
+  [[ -r $f ]] && openssl x509 -in "$f" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f'
+  return 0
+}
+
+deep_client_config() { # ссылка порт-socks [отпечаток] → конфиг клиента Xray (печатает JSON); не 0 – проверять нечем
+  python3 - "$1" "$2" "${3:-}" <<'PY'
 import json, sys
 from urllib.parse import urlparse, parse_qs, unquote
 u = urlparse(sys.argv[1]); q = {k: v[0] for k, v in parse_qs(u.query).items()}
+if u.scheme == "hysteria2":
+    tls = {"serverName": q.get("sni", ""), "alpn": ["h3"], "fingerprint": q.get("fp", "chrome")}
+    pin = q.get("pinSHA256") or (sys.argv[3] if len(sys.argv) > 3 else "")
+    if not pin:
+        sys.exit(1)
+    tls["pinnedPeerCertSha256"] = pin
+    print(json.dumps({"log": {"loglevel": "none"},
+        "inbounds": [{"listen": "127.0.0.1", "port": int(sys.argv[2]), "protocol": "socks", "settings": {"udp": False}}],
+        "outbounds": [{"protocol": "hysteria", "settings": {"version": 2, "address": u.hostname, "port": u.port},
+            "streamSettings": {"network": "hysteria", "security": "tls", "tlsSettings": tls,
+                               "hysteriaSettings": {"version": 2, "auth": u.username}}}]}))
+    sys.exit(0)
 if u.scheme != "vless" or q.get("security") != "reality":
     sys.exit(1)
 net = q.get("type", "tcp")
@@ -882,7 +905,8 @@ PY
 }
 
 deep_clients() {
-  local xray sid link name cfg port=18080 pid ok tmp
+  local xray sid link name cfg port=18080 pid ok tmp hypin
+  hypin=$(deep_hy_pin)
   xray=$(ls /usr/local/x-ui/bin/xray-linux-* 2>/dev/null | head -1)
   [[ -x $xray ]] || { c_warn "не нашёл Xray панели – подключения не проверил"; return 0; }
   command -v python3 >/dev/null || { c_warn "нет python3 – подключения не проверил"; return 0; }
@@ -891,16 +915,20 @@ deep_clients() {
   tmp=$(mktemp -d)
   while IFS= read -r link; do
     name=${link#*@}; name=${name%%\?*}; name=${name##*:}
-    if [[ $link == *type=xhttp* ]]; then name="XHTTP (порт $name)"; else name="REALITY (порт $name)"; fi
+    if [[ $link == hysteria2://* ]]; then name="Hysteria2 (порт $name/udp)"; elif [[ $link == *type=xhttp* ]]; then name="XHTTP (порт $name)"; else name="REALITY (порт $name)"; fi
     port=$((port + 1)); cfg=$tmp/$port.json
-    deep_client_config "$link" "$port" >"$cfg" 2>/dev/null || continue
+    deep_client_config "$link" "$port" "$hypin" >"$cfg" 2>/dev/null || continue
     "$xray" run -c "$cfg" >/dev/null 2>&1 & pid=$!
     sleep 2; ok=no
-    curl -fsS -m 20 --socks5-hostname "127.0.0.1:$port" -o /dev/null https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null && ok=yes
+    # Ядро панели после смены настроек перезапускается несколько секунд: даём до трёх попыток.
+    for _ in 1 2 3; do
+      curl -fsS -m 15 --socks5-hostname "127.0.0.1:$port" -o /dev/null https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null && { ok=yes; break; }
+      sleep 3
+    done
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
     if [[ $ok == yes ]]; then c_ok "$name: клиент подключился к серверу и открыл страницу"
     else c_bad "" "$name: клиент не смог подключиться и открыть страницу (проверьте kit sni, журнал: journalctl -u x-ui -n 30)"; fi
-  done < <(collect_links "$sid" '^vless://.*security=reality')
+  done < <(collect_links "$sid" '^(vless://.*security=reality|hysteria2://)')
   rm -rf "$tmp"
   c_info "Проверка идёт с самого сервера: доступность из вашей сети она не покажет. Остальные протоколы проверены только по открытому порту."
 }
@@ -1592,6 +1620,27 @@ PY
   python3 -c "$script" "$name" <<<"$raw"
 }
 
+# ---------- Hysteria2: ответ сайтом на чужой HTTP/3-запрос (masquerade) ----------
+
+hy_masq_state() { api GET inbounds/list 2>/dev/null | jq -r '[.[] | select(.protocol == "hysteria")][0] | (.streamSettings | if type == "string" then fromjson else . end).hysteriaSettings.masquerade.type // empty' 2>/dev/null || true; }
+
+hy_masq() { # on|off
+  local act=${1:-} id page
+  [[ $act == on || $act == off ]] || die "kit net masq on|off"
+  id=$(api GET inbounds/list | jq -r '[.[] | select(.protocol == "hysteria")][0].id // empty')
+  [[ -n $id ]] || die "На сервере нет Hysteria2."
+  if [[ $act == on ]]; then
+    page=$(cat /var/www/kit/index.html 2>/dev/null || true)
+    [[ -n $page ]] || page='<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Cumulo Cloud</title></head><body style="font-family:sans-serif;text-align:center;margin-top:20vh"><h1>Cumulo Cloud</h1><p>Service status: all systems operational.</p></body></html>'
+    inbound_patch "$id" '.streamSettings |= ((if type == "string" then fromjson else . end) | .hysteriaSettings.masquerade = {type: "string", content: $c, statusCode: 200, headers: {"content-type": "text/html; charset=utf-8"}})' --arg c "$page" \
+      || die "Панель не приняла изменение. Ничего не изменилось."
+    say "Hysteria2 теперь отвечает на чужой HTTP/3-запрос страницей сайта."
+  else
+    inbound_patch "$id" '.streamSettings |= ((if type == "string" then fromjson else . end) | del(.hysteriaSettings.masquerade))' || die "Панель не приняла изменение."
+    say "Маскировка Hysteria2 выключена."
+  fi
+}
+
 # ---------- kit net: протоколы, порты, сайт маскировки, отпечаток ----------
 
 net_main_name() { case $1 in REALITY | XHTTP | Hysteria2) return 0 ;; *) return 1 ;; esac; }
@@ -1645,6 +1694,10 @@ net_show() {
   [[ $shown_reality2 == yes ]] || printf '  %s %s %s %s\n' "$(padr REALITY-2 20)" "$(padr – 12)" "$(padr выкл 8)" "включить: kit net on reality2"
   echo
   echo "Отпечаток клиента: ${fpl:-?} (сменить: kit net fp firefox)"
+  if jq -e 'any(.[]; .protocol == "hysteria")' <<<"$list" >/dev/null; then
+    if [[ -n $(hy_masq_state) ]]; then echo "Hysteria2 отвечает на чужой запрос страницей сайта (выключить: kit net masq off)"
+    else echo "Hysteria2 без маскировки под сайт (включить: kit net masq on)"; fi
+  fi
 }
 
 net_toggle() { # on|off имя [-y]
@@ -1706,8 +1759,9 @@ cmd_net() {
     port) port_set "$@" ;;
     off | on) net_toggle "${sub,,}" "$@" ;;
     fp) net_fp "$@" ;;
+    masq) hy_masq "$@" ;;
     vision) case ${1:-} in on) cmd_vision --all ;; off) cmd_vision --all off ;; *) die "kit net vision on|off" ;; esac ;;
-    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | vision on|off]" ;;
+    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | vision on|off]" ;;
   esac
 }
 

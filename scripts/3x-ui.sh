@@ -650,6 +650,7 @@ main() {
     issue_domain_cert || die "Без сертификата для $DOMAIN продолжать нельзя. Исправьте причину и запустите скрипт снова."
     OPEN+=("80/tcp")
   fi
+  STUB_HTML=$(stub_site)
   local p
   for p in "${PROTOS[@]}"; do "proto_$p"; done
   # Первый пользователь – сразу на всех протоколах (как «kit user add»).
@@ -682,7 +683,7 @@ main() {
     chk=$(/usr/local/bin/kit check --deep 2>&1) && { bad=no; break; }
   done
   if [[ $bad == no ]]; then
-    ok "подключения работают: REALITY и XHTTP проверены клиентом с самого сервера"
+    ok "подключения работают: REALITY, XHTTP и Hysteria2 проверены клиентом с самого сервера"
   else
     install -m 600 /dev/null /var/log/kit-install-check.log
     printf '%s\n' "$chk" >/var/log/kit-install-check.log
@@ -1074,7 +1075,9 @@ proto_ss() {
 proto_hy2() {
   local settings stream
   settings=$(jq -nc --arg a "$(rand_str 16)" --argjson c "$(client_base hy2)" '{version: 2, clients: [$c + {auth: $a}]}')
-  stream=$(jq -nc --argjson t "$(tls_json '["h3"]')" '{network: "hysteria", hysteriaSettings: {version: 2}, security: "tls", tlsSettings: $t}')
+  # На чужой HTTP/3-запрос сервер отвечает страницей сайта (masquerade), а не молчанием или ошибкой.
+  stream=$(jq -nc --argjson t "$(tls_json '["h3"]')" --arg page "${STUB_HTML:-}" '{network: "hysteria", security: "tls", tlsSettings: $t,
+    hysteriaSettings: ({version: 2} + (if $page != "" then {masquerade: {type: "string", content: $page, statusCode: 200, headers: {"content-type": "text/html; charset=utf-8"}}} else {} end))}')
   add_inbound "Hysteria2" "$PORT" udp hysteria "$settings" "$stream"
 }
 
@@ -1324,7 +1327,7 @@ setup_nginx() {
   fi
 
   install -d -m 755 /var/www/kit
-  [[ -f /var/www/kit/index.html ]] || stub_site >/var/www/kit/index.html
+  [[ -f /var/www/kit/index.html ]] || { if [[ -n ${STUB_HTML:-} ]]; then printf '%s\n' "$STUB_HTML"; else stub_site; fi; } >/var/www/kit/index.html
 
   # Маршруты – из текущих подключений панели: сайты REALITY, пути WebSocket, сервисы gRPC.
   local list reality_sni xhttp_sni mt_sni steal_domain locs="" kind path port
