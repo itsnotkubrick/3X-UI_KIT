@@ -16,13 +16,13 @@ set -Eeuo pipefail
 # На свежем VPS в фоне идут автообновления системы и держат замок dpkg: ждём его, а не падаем.
 apt-get() { command apt-get -o DPkg::Lock::Timeout=900 "$@"; }
 
-HY_VERSION="2.12.3"
+HY_VERSION="2.13.0"
 HY_REPO="HyNetworks/hysteria"
 # SHA256 бинарников этой версии, записанные в сам скрипт: проверка не зависит от файла
-# hashes.txt, который лежит там же, где бинарник (2026-09-30, hashes.txt релиза app/v2.12.3).
+# hashes.txt, который лежит там же, где бинарник (2026-10-05, сверено со скачанными бинарниками и hashes.txt релиза app/v2.13.0).
 declare -A HY_SHA256=(
-  [amd64]=8c7a68a906998b747a0db87586e364f995fbfddb95693ae6e2fdb68a6e920d3e
-  [arm64]=c8dc653c3ba0a28d29a26b8fa52d2086f27c0927afddce95c09965e7174e78b0
+  [amd64]=907ba8c9693edb104b20582681fb7dc15639d5b64a9cbb616a7b539190a86691
+  [arm64]=a68a61a84452ca250ce0368202521965ca9cc9d801a404f1dc9008ac6cf677a7
 )
 KIT_VERSION="1.2"
 KIT_REPO_RAW="https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT"
