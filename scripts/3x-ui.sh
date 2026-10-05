@@ -1191,7 +1191,7 @@ telegram_reachable() {
 }
 
 proto_mtproto() {
-  # MTProto бесполезен, если сам сервер не достаёт до Telegram (некоторые хостеры его блокируют).
+  # MTProto бесполезен, если сам сервер не достаёт до Telegram (так бывает у отдельных хостеров).
   if ! telegram_reachable; then
     later "MTProto пропущен: с этого сервера недоступны серверы Telegram – прокси для Telegram здесь работать не будет."
     return
