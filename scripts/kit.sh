@@ -625,8 +625,15 @@ cmd_update() {
     # С 1.1 kit-sub работает без root: переписываем юнит под DynamicUser и LoadCredential.
     local c k
     c=$(jq -r '.cert // empty' /etc/kit-sub/config.json); k=$(jq -r '.key // empty' /etc/kit-sub/config.json)
-    kit_sub_unit "$c" "$k" >/etc/systemd/system/kit-sub.service
-    [[ -n $c ]] && echo '19 4 * * * root systemctl restart kit-sub >/dev/null 2>&1' >/etc/cron.d/kit-sub-cert
+    local sysv
+    sysv=$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2}')
+    if [[ $sysv =~ ^[0-9]+$ ]] && ((sysv < 247)); then
+      # LoadCredential появился в systemd 247: на более старой юнит без root не запустится, оставляем прежний.
+      warn "systemd $sysv старше 247: юнит kit-sub не меняю (подписка работает как раньше). Лучше перейти на Ubuntu 22.04+ или Debian 11+."
+    else
+      kit_sub_unit "$c" "$k" >/etc/systemd/system/kit-sub.service
+      [[ -n $c ]] && echo '19 4 * * * root systemctl restart kit-sub >/dev/null 2>&1' >/etc/cron.d/kit-sub-cert
+    fi
     systemctl daemon-reload
     if systemctl restart kit-sub && sleep 2 && sub_ok; then
       say "Подписка kit-sub обновлена и отвечает"

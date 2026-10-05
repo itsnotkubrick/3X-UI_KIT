@@ -372,6 +372,10 @@ main() {
   set -- ${args[@]+"${args[@]}"}
   [[ $EUID -eq 0 ]] || die "Запустите от root: sudo -i, затем команду ещё раз."
   command -v systemctl >/dev/null || die "Нужен systemd."
+  # kit-sub работает без root и получает конфиг через LoadCredential: он появился в systemd 247 (Ubuntu 22.04+, Debian 11+).
+  local sysv
+  sysv=$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2}')
+  [[ $sysv =~ ^[0-9]+$ ]] && ((sysv < 247)) && die "Версия systemd ($sysv) слишком старая, нужна 247 и новее: Ubuntu 22.04 и новее, Debian 11 и новее. На этой системе подписка не запустится – поставьте поддерживаемую."
   if [[ -f $RESULT && -x /usr/local/x-ui/x-ui ]]; then
     die "3X-UI уже установлена этим скриптом. Управление: команда x-ui, данные для входа: cat $RESULT"
   fi
