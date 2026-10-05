@@ -142,13 +142,19 @@ direct_links() { # subId фильтр
 # Панель «через SSH-туннель»: подписка слушает только 127.0.0.1, с телефона по ней не зайти.
 local_only_sub() { [[ ${SUB_BASE:-} == http://127.0.0.1* || ${SUB_BASE:-} == http://localhost* ]]; }
 
-# Ссылки «открыть в приложении»: нажатие добавляет подписку сразу с названием (проверено: Karing и Happ).
+# Ссылки «открыть в приложении»: нажатие добавляет подписку сразу с названием.
+# Проверено на устройстве: Karing, Happ. Остальные собраны по документации приложений.
 app_links() { # адрес подписки
   local url=$1 enc
   enc=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$url")
   echo "Открыть в приложении (отправьте ссылку себе или близкому в мессенджер и нажмите):"
-  echo "  Karing: karing://install-config?url=$enc&name=3X-UI%20KIT"
-  echo "  Happ:   happ://add/$url"
+  echo "  Karing:       karing://install-config?url=$enc&name=3X-UI%20KIT"
+  echo "  Happ:         happ://add/$url"
+  echo "  Hiddify:      hiddify://import/$url#3X-UI%20KIT"
+  echo "  Clash Verge:  clash://install-config?url=$enc&name=3X-UI%20KIT"
+  echo "  FlClash:      flclash://install-config?url=$enc"
+  echo "  Mihomo Party: mihomo://install-config?url=$enc&name=3X-UI%20KIT"
+  echo "  v2rayNG:      v2rayng://install-sub?url=$enc&name=3X-UI%20KIT"
 }
 
 show_link() { # имя subId

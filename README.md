@@ -93,7 +93,7 @@ kit                                                    # меню: пользо�
 
 kit user add имя [--gb 50] [--days 30] [--devices 3]   # добавить пользователя во все протоколы, показать подписку и ссылки
 kit user list                                          # кто сколько израсходовал, до какого числа, когда был в сети
-kit user link имя [--all | --amnezia | --telegram]     # подписка, ссылки «открыть в Karing и Happ», отдельные ссылки (AmneziaVPN, Telegram – ключами)
+kit user link имя [--all | --amnezia | --telegram]     # подписка, ссылки «открыть в приложении», отдельные ссылки (AmneziaVPN, Telegram – ключами)
 kit user limit имя [--gb N] [--days N] [--devices N]   # изменить лимиты (0 – без ограничений)
 kit user off имя  /  kit user on имя                   # временно выключить и включить
 kit user del имя                                       # удалить пользователя

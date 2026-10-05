@@ -38,6 +38,8 @@ CLASH_UA = re.compile(r"clash|mihomo|flclash|stash|nyanpasu|meta", re.I)
 # тоже могут просить формат Clash (Karing так и делает), но AmneziaWG не умеют.
 NO_AWG_UA = re.compile(r"karing|hiddify|nekobox|sing-?box|husi|stash|shadowrocket|v2box|streisand|happ|loon|surge|quantumult", re.I)
 SUB_ID = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+# Страница подписки для браузера (React от 3X-UI) подгружает скрипты и стили из «<путь>/assets/…»: пропускаем только такие файлы.
+ASSET = re.compile(r"^assets/[A-Za-z0-9_.-]{1,128}\.(js|css|woff2?|svg|png|ico|map)$")
 # Заголовки Happ, которые 3X-UI отдаёт в подписке (маршрутизация, баннеры, настройки клиента).
 HAPP_HEADERS = ("routing", "routing-enable", "announce", "providerid", "new-url", "fallback-url",
                 "hide-settings", "no-limit-enabled", "ping-type", "color-profile", "tun-mode", "tun-type",
@@ -249,7 +251,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not path.startswith(PATH):
             return self.send_html_error(404)
         sub_id = path[len(PATH):]
-        if not SUB_ID.match(sub_id):
+        if not SUB_ID.match(sub_id) and not ASSET.match(sub_id):
             return self.send_html_error(404)
         ua = self.headers.get("User-Agent", "")
         host = CONF.get("link_host") or self.headers.get("Host", CONF.get("host", ""))
