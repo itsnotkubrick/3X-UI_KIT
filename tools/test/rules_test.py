@@ -111,6 +111,16 @@ class Rules(unittest.TestCase):
         self.assertIn(("GEOIP", "telegram"), rules)
         self.assertNotIn(("DOMAIN-SUFFIX", "example.org"), rules)  # пример закомментирован
 
+    def test_rules_only_for_mihomo_apps(self):
+        # Что если: Karing/Hiddify просят формат Clash – правила им не нужны (у них своя маршрутизация)
+        def gets_rules(ua):
+            clash = bool(ks.CLASH_UA.search(ua))
+            return clash and not ks.NO_AWG_UA.search(ua)
+        for ua in ("FlClash/0.8.80", "Clash.Meta/1.18", "mihomo/1.19", "clash-verge/v2.0", "ClashVerge/2.0", "Mihomo Party/1.5"):
+            self.assertTrue(gets_rules(ua), ua)
+        for ua in ("Karing/1.2.5", "Karing/1.2.5 clash.meta", "Hiddify/2.0 clash", "sing-box/1.9", "Happ/1.0", "Stash/2.7", "v2rayN/6.0", "Mozilla/5.0"):
+            self.assertFalse(gets_rules(ua), ua)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

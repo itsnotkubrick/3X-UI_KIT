@@ -1843,7 +1843,7 @@ net_split() { # [on|off|check]
         n=$(python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules 2>&1 | grep -a '^Правил через VPN' || true)
         echo "Раздельная маршрутизация включена: $n"
         echo "Файл: $SPLIT_FILE (править, проверить: kit net split check, выключить: kit net split off)"
-        echo "Работает в приложениях на Mihomo; Xray и sing-box приложения получают подписку как раньше."
+        echo "Работает в приложениях на Mihomo; Karing, Hiddify, Happ и другие получают подписку как раньше."
       else
         echo "Раздельная маршрутизация выключена: через VPN идёт весь трафик. Включить: kit net split on"
       fi ;;

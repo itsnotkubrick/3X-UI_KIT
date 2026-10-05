@@ -387,7 +387,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = add_auto(body)
             if code == 200 and clash and CONF.get("dns", True):
                 body = add_dns(body)
-            if code == 200 and clash:
+            if code == 200 and awg:
+                # Правила – только приложениям на ядре Mihomo (проверено: geosite, sniffer, nameserver-policy). Karing, Hiddify
+                # и другие на sing-box тоже могут просить формат Clash, но свою маршрутизацию они ведут сами: им подписка прежняя.
                 loaded = load_rules()
                 if loaded:
                     body = apply_rules(body, loaded)
