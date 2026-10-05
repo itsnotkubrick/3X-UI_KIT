@@ -934,6 +934,14 @@ print(json.dumps({"log": {"loglevel": "none"},
 PY
 }
 
+# Подключения клиентом, только итог (для проверки до и после обновления панели): 0 – всё подключается.
+deep_probe() {
+  CHECK_BAD=0; CHECK_WARN=0; CHECK_QUIET=yes
+  deep_clients >/dev/null 2>&1 || true
+  CHECK_QUIET=no
+  ((CHECK_BAD == 0))
+}
+
 deep_clients() {
   local xray sid link name cfg port=18080 pid ok tmp hypin
   hypin=$(deep_hy_pin)
@@ -1144,6 +1152,9 @@ panel_update() {
   tar xzf "$tmp/x-ui.tar.gz" -C "$tmp"
   [[ -s $tmp/x-ui/x-ui ]] || die "В архиве панели нет x-ui. Сервер не тронут."
 
+  # Подключения клиентом до обновления: если они работали, после обновления должны работать так же, иначе вернём прежнюю панель.
+  local pre=no
+  deep_probe && pre=ok
   # 2. Копия на случай отката (база снимается средствами SQLite).
   ts=$(date +%Y%m%d-%H%M); bak=/root/x-ui-before-update-$ts
   install -d -m 700 "$bak/etc-x-ui"
@@ -1186,14 +1197,15 @@ PY
   systemctl start x-ui
 
   # 4. Проверка и откат при провале.
-  if panel_healthy && [[ $(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1) == "$target" ]]; then
+  if panel_healthy && [[ $(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1) == "$target" ]] && { [[ $pre != ok ]] || { sleep 5; deep_probe; }; }; then
     systemctl is-active -q x-ui || true
     say "Панель обновлена до $target, ядро Xray ${XRAY_PIN#v} осталось."
+    [[ $pre == ok ]] && say "Подключения клиентом после обновления работают (REALITY, XHTTP, Hysteria2)."
     echo "Копию прежней панели можно удалить, когда убедитесь, что всё работает: rm -rf $bak"
     echo "Проверить сервер: ${B}kit check${N}"
     return 0
   fi
-  warn "Панель после обновления не отвечает – возвращаю прежнюю."
+  warn "Панель после обновления не отвечает или подключения клиентом не работают – возвращаю прежнюю."
   systemctl stop x-ui || true
   rm -rf /usr/local/x-ui && cp -a "$bak/usr-local-x-ui" /usr/local/x-ui
   cp -a "$bak/etc-x-ui/." /etc/x-ui/
@@ -1640,22 +1652,16 @@ def sch_net_ok(label, net):
     return label not in ("Shadowsocks",)
 print("ПОДКЛЮЧЕНИЕ  ·  %s" % name)
 print()
-main = [i for m in MAIN for i in items if i[0] == m]
-ORDER = ["REALITY-2", "VLESS-WS", "Trojan-gRPC", "VMess-WS", "Shadowsocks", "TUIC", "AmneziaWG", "AmneziaWG 3.1", "MTProto"]
-spare = [i for i in items if i[0] not in MAIN]
-spare.sort(key=lambda i: ORDER.index(i[0]) if i[0] in ORDER else len(ORDER))
+ORDER = ["REALITY", "XHTTP", "Hysteria2", "REALITY-2", "VLESS-WS", "Trojan-gRPC", "VMess-WS", "Shadowsocks", "TUIC", "AmneziaWG", "AmneziaWG 3.1", "MTProto"]
+items.sort(key=lambda i: ORDER.index(i[0]) if i[0] in ORDER else len(ORDER))
 qr_done = False
-for title, group in (("Основные", main), ("Запасные", spare)):
-    if not group:
-        continue
-    print(title)
-    for it in group:
-        show(*it)
-        if not qr_done and it[0] == "REALITY" and shutil.which("qrencode") and not os.environ.get("KIT_NO_QR"):
-            sys.stdout.flush()
-            subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "1", it[4]])
-            print()
-            qr_done = True
+for it in items:
+    show(*it)
+    if not qr_done and it[0] == "REALITY" and shutil.which("qrencode") and not os.environ.get("KIT_NO_QR"):
+        sys.stdout.flush()
+        subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "1", it[4]])
+        print()
+        qr_done = True
 PY
   python3 -c "$script" "$name" <<<"$raw"
 }
@@ -1967,14 +1973,12 @@ inbound_patch() { # id фильтр-jq [аргументы jq...]: меняет 
 }
 
 net_show() {
-  local list name port proto listen en sni fp shown_reality2=no mark note group fpl=""
+  local list name port proto listen en sni fp shown_reality2=no mark note fpl=""
   list=$(api GET inbounds/list)
   printf '%s %s %s %s\n' "$(padr Протоколы 22)" "$(padr Порт 12)" "$(padr Статус 8)" "Заметка"
-  for group in main spare; do
-    if [[ $group == main ]]; then echo "Основные"; else echo "Запасные"; fi
+  {
     while IFS='|' read -r name port proto listen en sni fp; do
       [[ -n $name ]] || continue
-      if net_main_name "$name"; then [[ $group == main ]] || continue; else [[ $group == spare ]] || continue; fi
       [[ $name == REALITY-2 ]] && shown_reality2=yes
       if [[ $listen == 127.0.0.1 ]]; then mark="443/tcp"; else mark="$port/$(port_net "$proto")"; fi
       [[ $(port_net "$proto") == both ]] && mark=$port
@@ -1985,7 +1989,7 @@ net_show() {
     done < <(jq -r '.[] | (.streamSettings | if type == "string" then fromjson else . end) as $s
       | [.remark, .port, .protocol, .listen, .enable, ($s.realitySettings.serverNames[0] // ""),
          ($s.realitySettings.settings.fingerprint // $s.tlsSettings.settings.fingerprint // "")] | map(tostring) | join("|")' <<<"$list")
-  done
+  }
   [[ $shown_reality2 == yes ]] || printf '  %s %s %s %s\n' "$(padr REALITY-2 20)" "$(padr – 12)" "$(padr выкл 8)" "включить: kit net on reality2"
   echo
   echo "Отпечаток клиента: ${fpl:-?} (сменить: kit net fp firefox)"

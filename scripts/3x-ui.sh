@@ -231,7 +231,7 @@ choose_masking() {
   echo "${B}Под какой сайт маскировать сервер?${N}"
   echo "Со стороны он будет выглядеть как обычный сайт."
   echo
-  echo "  ${B}1${N}  Свой домен          самый надёжный: нужен домен и свободный порт 80"
+  echo "  ${B}1${N}  Свой домен          самый надёжный: нужен домен и свободный порт 80   ${G}[рекомендуем]${N}"
   echo "  ${B}2${N}  Сосед по подсети    подберу сам, домен не нужен   ${G}[рекомендуем]${N}"
   echo "  ${B}3${N}  Свой сайт           вы вводите адрес сами"
   echo "     ${D}Сертификат своего домена виден в публичных журналах сертификатов: связь «домен – сервер» не скрыта.${N}"
@@ -382,7 +382,7 @@ ART
   printf '%s' "$N"
   echo
   echo "${B}3X-UI KIT $KIT_VERSION${N}  ·  it's not Kubrick. it's just a VPN."
-  echo "${D}на основе панели 3X-UI (MHSanaei/3x-ui), ядра Xray и mihomo · github.com/itsnotkubrick/3X-UI_KIT${N}"
+  echo "${D}на основе панели 3X-UI (MHSanaei/3x-ui) и ядра Xray · github.com/itsnotkubrick/3X-UI_KIT${N}"
 }
 
 main() {
@@ -790,21 +790,12 @@ main() {
     echo "  Вставьте в Happ, Hiddify, Karing, v2rayN, Clash Verge или FlClash."
     qrencode -t ANSIUTF8 -m 1 "$SUB_URL" || true
     echo
-    /usr/local/bin/kit __applinks "$SUB_URL" || true
-    echo
     KIT_NO_QR=1 /usr/local/bin/kit __links "$NAME" "$SUBID" || true
   else
     /usr/local/bin/kit __links "$NAME" "$SUBID" || true
   fi
   echo
-  local main_list="" spare_list="" c
-  for c in "${CREATED[@]}"; do
-    case $c in REALITY | XHTTP | Hysteria2) main_list+="$c, " ;; *) spare_list+="$c, " ;; esac
-  done
-  echo "${B}ПРОТОКОЛЫ${N}"
-  echo "  Основные: ${main_list%, }"
-  echo "  Запасные: ${spare_list%, }"
-  echo "  Порты и выключение лишнего: ${B}kit net${N}"
+  echo "${D}Порты, выключение и включение протоколов: ${N}${B}kit net${N}"
   if ((${#WARNINGS[@]})); then
     echo
     echo "${B}ВНИМАНИЕ${N}"
