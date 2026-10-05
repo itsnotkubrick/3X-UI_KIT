@@ -86,6 +86,31 @@ class Rules(unittest.TestCase):
         loaded = ks.load_rules(report=lambda m: None)
         self.assertEqual(ks.apply_rules(b"proxies: []\n", loaded), b"proxies: []\n")
 
+    def test_forgiving_input(self):
+        # Что если: строчные типы, BOM и CRLF из Windows-редактора, лишние пробелы
+        with open(ks.RULES_FILE, "wb") as f:
+            f.write("\ufeffvia_vpn:\r\n  - geosite , youtube\r\n  - domain-suffix,Example.ORG\r\n".encode("utf-8"))
+        rules, _ = ks.load_rules(report=lambda m: None)
+        self.assertEqual(rules, [("GEOSITE", "youtube"), ("DOMAIN-SUFFIX", "Example.ORG")])
+
+    def test_bad_cidr_and_short_keyword(self):
+        write("via_vpn:\n  - IP-CIDR,999.1.1.1/8\n  - IP-CIDR,1.2.3.4/99\n  - IP-CIDR6,1.2.3.0/24\n  - IP-CIDR,2001:db8::/32\n"
+              "  - IP-CIDR,203.0.113.0/24\n  - IP-CIDR6,2001:db8::/32\n  - DOMAIN-KEYWORD,a\n  - DOMAIN-KEYWORD,video\n")
+        rules, _ = ks.load_rules(report=lambda m: None)
+        self.assertEqual(rules, [("IP-CIDR", "203.0.113.0/24"), ("IP-CIDR6", "2001:db8::/32"), ("DOMAIN-KEYWORD", "video")])
+
+    def test_template_from_kit_sh_is_valid(self):
+        # Что если: шаблон kit net split on сам окажется с ошибкой
+        import re
+        t = open(os.path.join(root, "scripts", "kit.sh"), encoding="utf-8").read()
+        body = t[t.index("split_template() {"):]
+        body = body[body.index("<<'YAML'\n") + 9: body.index("\nYAML\n")]
+        write(body)
+        rules, _ = ks.load_rules(report=lambda m: self.fail(m))
+        self.assertGreater(len(rules), 40)
+        self.assertIn(("GEOIP", "telegram"), rules)
+        self.assertNotIn(("DOMAIN-SUFFIX", "example.org"), rules)  # пример закомментирован
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

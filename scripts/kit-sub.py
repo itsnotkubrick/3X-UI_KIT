@@ -16,6 +16,7 @@ https://github.com/itsnotkubrick/3X-UI_KIT
 import base64
 import http.client
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -218,7 +219,7 @@ def load_rules(report=None):
         say(f"правила: файл больше {RULES_MAX_BYTES // 1024} КБ – не применяю")
         return None
     try:
-        data = yaml.safe_load(raw.decode("utf-8")) or {}
+        data = yaml.safe_load(raw.decode("utf-8-sig")) or {}
     except (yaml.YAMLError, UnicodeError) as e:
         say(f"правила: файл не разобран ({e}) – не применяю")
         return None
@@ -229,12 +230,27 @@ def load_rules(report=None):
     rules, seen = [], set()
     for item in items[:RULES_MAX_COUNT + 50]:
         r = re.sub(r"\s*,\s*", ",", str(item).strip())
+        kind, _, value = r.partition(",")
+        r = kind.upper() + "," + value  # «domain-suffix,…» тоже понимаем
         m = RULE_RE.match(r)
         if not m:
             say(f"правила: пропускаю непонятное правило {str(item)[:80]!r}")
-        elif r not in seen and len(rules) < RULES_MAX_COUNT:
-            seen.add(r)
-            rules.append((m.group(1), m.group(2)))
+            continue
+        kind, value = m.group(1), m.group(2)
+        if kind in ("IP-CIDR", "IP-CIDR6"):
+            try:
+                net = ipaddress.ip_network(value, strict=False)
+            except ValueError:
+                net = None
+            if net is None or net.version != (6 if kind == "IP-CIDR6" else 4):
+                say(f"правила: неверная подсеть {value!r} – пропускаю")
+                continue
+        if kind == "DOMAIN-KEYWORD" and len(value) < 4:
+            say(f"правила: слово {value!r} слишком короткое (под него попадёт почти всё) – пропускаю")
+            continue
+        if (kind, value) not in seen and len(rules) < RULES_MAX_COUNT:
+            seen.add((kind, value))
+            rules.append((kind, value))
     if not rules:
         say("правила: ни одного пригодного – не применяю")
         return None
@@ -399,26 +415,21 @@ class Server(http.server.ThreadingHTTPServer):
     address_family = socket.AF_INET6 if ":" in CONF.get("listen", "") else socket.AF_INET
 
 
-GEOSITE_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+GEO_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/{}.dat"
 
 
-def unknown_geosites(names):
-    """Сверяет категории GEOSITE с базой, которую скачают приложения: неизвестное имя ломает запуск конфига у клиента.
-    Нет доступа к GitHub – не проверяем (None-результат пустой)."""
+def unknown_geo(kind, names):
+    """Сверяет категории GEOSITE/GEOIP с базой, которую скачают приложения: неизвестное имя ломает запуск конфига у клиента.
+    Нет доступа к GitHub – не проверяем."""
     if not names:
         return []
     try:
-        with urllib.request.urlopen(GEOSITE_URL, timeout=30) as r:
-            data = r.read(32 * 1024 * 1024)
-    except (urllib.error.URLError, OSError):
-        print("Категории GEOSITE не проверил: база недоступна. Названия сверьте по github.com/MetaCubeX/meta-rules-dat (geo/geosite).")
+        with urllib.request.urlopen(GEO_URL.format(kind), timeout=30) as r:
+            data = r.read(48 * 1024 * 1024)
+    except (urllib.error.URLError, OSError) as e:
+        print(f"Категории {kind.upper()} не проверил: база недоступна ({e}). Названия сверьте по github.com/MetaCubeX/meta-rules-dat.")
         return []
-    bad = []
-    for n in names:
-        b = n.upper().encode()
-        if b"\x0a" + bytes([len(b)]) + b not in data:
-            bad.append(n)
-    return bad
+    return [n for n in names if b"\x0a" + bytes([len(n)]) + n.upper().encode() not in data]
 
 
 def main():
@@ -427,9 +438,9 @@ def main():
         loaded = load_rules(report=print)
         if loaded:
             print(f"Правил через VPN: {len(loaded[0])}; DNS для остального: {', '.join(loaded[1]) or 'системный'}")
-            unknown = unknown_geosites([v for k, v in loaded[0] if k == "GEOSITE"])
-            if unknown:
-                print("Нет такой категории GEOSITE: " + ", ".join(unknown) + ". Приложение не сможет запустить конфиг – исправьте или удалите эти строки.")
+            bad = [f"{k} {n}" for k in ("geosite", "geoip") for n in unknown_geo(k, [v for kk, v in loaded[0] if kk == k.upper()])]
+            if bad:
+                print("Нет такой категории: " + ", ".join(bad) + ". Приложение не сможет запустить конфиг – исправьте или удалите эти строки.")
                 raise SystemExit(2)
         raise SystemExit(0 if loaded else 1)
     cert, key = CONF.get("cert"), CONF.get("key")

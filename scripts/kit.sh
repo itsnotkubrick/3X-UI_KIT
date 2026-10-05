@@ -1746,29 +1746,77 @@ split_template() {
 #   DOMAIN,api.example.org       – ровно этот домен
 #   DOMAIN-KEYWORD,example       – домен, в котором есть слово
 #   IP-CIDR,203.0.113.0/24       – подсеть
-# GEOSITE: приложение один раз скачивает базу категорий с GitHub.
+# GEOSITE и GEOIP: приложение один раз скачивает базу категорий с GitHub.
 
 via_vpn:
-  - GEOSITE,youtube
+  # Нейросети
+  - GEOSITE,category-ai-!cn      # ChatGPT, Claude, Gemini, Perplexity и другие
   - GEOSITE,openai
   - GEOSITE,anthropic
-  # Раскомментируйте то, чем пользуетесь (уберите «# » в начале строки):
-  # - GEOSITE,telegram
-  # - GEOSITE,meta            # Instagram, Facebook, WhatsApp
-  # - GEOSITE,twitter         # X (Twitter)
-  # - GEOSITE,discord
-  # - GEOSITE,github
-  # - GEOSITE,linkedin
-  # - GEOSITE,netflix
-  # - GEOSITE,spotify
-  # - GEOSITE,tiktok
-  # - GEOSITE,reddit
-  # - GEOSITE,twitch
-  # - GEOSITE,notion
-  # - GEOSITE,figma
-  # - GEOSITE,zoom
-  # - GEOSITE,google          # все сервисы Google
-  # - GEOSITE,perplexity
+  - GEOSITE,perplexity
+  - GEOSITE,huggingface
+  # Видео и музыка
+  - GEOSITE,youtube
+  - GEOSITE,netflix
+  - GEOSITE,spotify
+  - GEOSITE,twitch
+  - GEOSITE,disney
+  - GEOSITE,hbo
+  - GEOSITE,primevideo
+  - GEOSITE,soundcloud
+  - GEOSITE,vimeo
+  - GEOSITE,tiktok
+  # Соцсети и мессенджеры
+  - GEOSITE,telegram
+  - GEOIP,telegram               # Telegram подключается по IP-адресам, без имён
+  - GEOSITE,meta                 # Instagram, Facebook, WhatsApp
+  - GEOSITE,twitter              # X (Twitter)
+  - GEOSITE,discord
+  - GEOSITE,reddit
+  - GEOSITE,linkedin
+  - GEOSITE,pinterest
+  - GEOSITE,tumblr
+  - GEOSITE,quora
+  - GEOSITE,medium
+  - GEOSITE,signal
+  - GEOSITE,viber
+  # Работа и разработка
+  - GEOSITE,google               # все сервисы Google
+  - GEOSITE,github
+  - GEOSITE,gitlab
+  - GEOSITE,docker
+  - GEOSITE,npmjs
+  - GEOSITE,jetbrains
+  - GEOSITE,atlassian
+  - GEOSITE,slack
+  - GEOSITE,notion
+  - GEOSITE,figma
+  - GEOSITE,canva
+  - GEOSITE,adobe
+  - GEOSITE,zoom
+  - GEOSITE,trello
+  - GEOSITE,dropbox
+  - GEOSITE,protonmail
+  - GEOSITE,mega
+  - GEOSITE,imgur
+  - GEOSITE,duckduckgo
+  - GEOSITE,wikimedia
+  # Иностранные СМИ
+  - GEOSITE,bbc
+  - GEOSITE,cnn
+  - GEOSITE,nytimes
+  - GEOSITE,reuters
+  - GEOSITE,bloomberg
+  # Раскомментируйте, если нужно (уберите «# » в начале строки). Это тяжёлый трафик или сервисы с привязкой к региону:
+  # - GEOSITE,microsoft
+  # - GEOSITE,apple
+  # - GEOSITE,steam
+  # - GEOSITE,epicgames
+  # - GEOSITE,playstation
+  # - GEOSITE,xbox
+  # - GEOSITE,nintendo
+  # - GEOSITE,cloudflare
+  # - GEOSITE,paypal
   # - DOMAIN-SUFFIX,example.org
 
 # Необязательно: DNS для всего остального (по умолчанию – системный DNS приложения). Только адреса https://…
@@ -1777,12 +1825,22 @@ via_vpn:
 YAML
 }
 
+# kit-sub работает без root и читает файл сам: если права закрыты (после правки редактором, копирования), список молча не применится.
+split_perms() {
+  [[ -f $SPLIT_FILE ]] || return 0
+  if ! [[ $(stat -c %a "$SPLIT_FILE") =~ ^[0-7][0-7][4-7]$ && $(stat -c %a /etc/kit-sub) =~ ^[0-7][0-7][1357]$ ]]; then
+    chmod 644 "$SPLIT_FILE"; chmod 755 /etc/kit-sub
+    warn "Права на $SPLIT_FILE были закрыты для подписки (kit-sub работает не от root) – исправил."
+  fi
+}
+
 net_split() { # [on|off|check]
   local act=${1:-} n
+  split_perms
   case $act in
     "")
       if [[ -f $SPLIT_FILE ]]; then
-        n=$(python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules 2>&1 | tail -1 || true)
+        n=$(python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules 2>&1 | grep -a '^Правил через VPN' || true)
         echo "Раздельная маршрутизация включена: $n"
         echo "Файл: $SPLIT_FILE (править, проверить: kit net split check, выключить: kit net split off)"
         echo "Работает в приложениях на Mihomo; Xray и sing-box приложения получают подписку как раньше."
@@ -1795,7 +1853,7 @@ net_split() { # [on|off|check]
       if [[ -f $SPLIT_FILE.off ]]; then install -m 644 "$SPLIT_FILE.off" "$SPLIT_FILE"; else split_template >"$SPLIT_FILE"; fi
       chmod 755 /etc/kit-sub; chmod 644 "$SPLIT_FILE"
       say "Включил: $SPLIT_FILE"
-      echo "Сейчас через VPN идут только перечисленные сервисы (YouTube, ChatGPT, Claude), остальное напрямую."
+      echo "Сейчас через VPN идут только перечисленные сервисы (популярные иностранные сервисы: YouTube, ChatGPT, Telegram и другие), остальное напрямую."
       echo "Список правится так: nano $SPLIT_FILE, затем kit net split check."
       echo "Приложения на Mihomo подхватят при обновлении подписки." ;;
     off)
