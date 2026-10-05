@@ -399,12 +399,38 @@ class Server(http.server.ThreadingHTTPServer):
     address_family = socket.AF_INET6 if ":" in CONF.get("listen", "") else socket.AF_INET
 
 
+GEOSITE_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+
+
+def unknown_geosites(names):
+    """Сверяет категории GEOSITE с базой, которую скачают приложения: неизвестное имя ломает запуск конфига у клиента.
+    Нет доступа к GitHub – не проверяем (None-результат пустой)."""
+    if not names:
+        return []
+    try:
+        with urllib.request.urlopen(GEOSITE_URL, timeout=30) as r:
+            data = r.read(32 * 1024 * 1024)
+    except (urllib.error.URLError, OSError):
+        print("Категории GEOSITE не проверил: база недоступна. Названия сверьте по github.com/MetaCubeX/meta-rules-dat (geo/geosite).")
+        return []
+    bad = []
+    for n in names:
+        b = n.upper().encode()
+        if b"\x0a" + bytes([len(b)]) + b not in data:
+            bad.append(n)
+    return bad
+
+
 def main():
     if "--check-rules" in sys.argv:
         # kit net split check: тот же разбор, что и при выдаче подписки, но с отчётом на экран.
         loaded = load_rules(report=print)
         if loaded:
             print(f"Правил через VPN: {len(loaded[0])}; DNS для остального: {', '.join(loaded[1]) or 'системный'}")
+            unknown = unknown_geosites([v for k, v in loaded[0] if k == "GEOSITE"])
+            if unknown:
+                print("Нет такой категории GEOSITE: " + ", ".join(unknown) + ". Приложение не сможет запустить конфиг – исправьте или удалите эти строки.")
+                raise SystemExit(2)
         raise SystemExit(0 if loaded else 1)
     cert, key = CONF.get("cert"), CONF.get("key")
     if cert and CREDS and os.path.exists(os.path.join(CREDS, "cert.pem")):

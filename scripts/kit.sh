@@ -1736,7 +1736,7 @@ SPLIT_FILE=/etc/kit-sub/rules.yaml
 split_template() {
   cat <<'YAML'
 # Раздельная маршрутизация подписки (приложения на Mihomo: Clash Verge, FlClash, Mihomo Party).
-# Через VPN идёт ТОЛЬКО перечисленное ниже, всё остальное – напрямую.
+# Через VPN идёт ТОЛЬКО перечисленное ниже (сервисы, которым VPN нужен), всё остальное – напрямую.
 # Правка вступает в силу, когда приложение обновит подписку; перезапуск не нужен.
 # Проверить файл: kit net split check. Выключить: kit net split off.
 #
@@ -1751,6 +1751,24 @@ split_template() {
 via_vpn:
   - GEOSITE,youtube
   - GEOSITE,openai
+  - GEOSITE,anthropic
+  # Раскомментируйте то, чем пользуетесь (уберите «# » в начале строки):
+  # - GEOSITE,telegram
+  # - GEOSITE,meta            # Instagram, Facebook, WhatsApp
+  # - GEOSITE,twitter         # X (Twitter)
+  # - GEOSITE,discord
+  # - GEOSITE,github
+  # - GEOSITE,linkedin
+  # - GEOSITE,netflix
+  # - GEOSITE,spotify
+  # - GEOSITE,tiktok
+  # - GEOSITE,reddit
+  # - GEOSITE,twitch
+  # - GEOSITE,notion
+  # - GEOSITE,figma
+  # - GEOSITE,zoom
+  # - GEOSITE,google          # все сервисы Google
+  # - GEOSITE,perplexity
   # - DOMAIN-SUFFIX,example.org
 
 # Необязательно: DNS для всего остального (по умолчанию – системный DNS приложения). Только адреса https://…
@@ -1777,7 +1795,7 @@ net_split() { # [on|off|check]
       if [[ -f $SPLIT_FILE.off ]]; then install -m 644 "$SPLIT_FILE.off" "$SPLIT_FILE"; else split_template >"$SPLIT_FILE"; fi
       chmod 755 /etc/kit-sub; chmod 644 "$SPLIT_FILE"
       say "Включил: $SPLIT_FILE"
-      echo "Сейчас через VPN идут только перечисленные сервисы (YouTube, ChatGPT), остальное напрямую."
+      echo "Сейчас через VPN идут только перечисленные сервисы (YouTube, ChatGPT, Claude), остальное напрямую."
       echo "Список правится так: nano $SPLIT_FILE, затем kit net split check."
       echo "Приложения на Mihomo подхватят при обновлении подписки." ;;
     off)
@@ -1786,7 +1804,11 @@ net_split() { # [on|off|check]
       say "Выключил: подписка снова отдаёт весь трафик через VPN (список сохранён: $SPLIT_FILE.off)." ;;
     check)
       [[ -f $SPLIT_FILE ]] || die "Файла нет: $SPLIT_FILE (включить: kit net split on)"
-      python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules || die "Список не применится – подписка останется без раздельной маршрутизации." ;;
+      python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules && return 0
+      case $? in
+        2) die "Исправьте список: с неизвестной категорией приложения на Mihomo не смогут запустить конфиг." ;;
+        *) die "Список не применится – подписка останется без раздельной маршрутизации." ;;
+      esac ;;
     *) die "kit net split [on|off|check]" ;;
   esac
 }
