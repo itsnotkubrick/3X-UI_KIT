@@ -787,6 +787,8 @@ main() {
     echo "  Вставьте в Happ, Hiddify, Karing, v2rayN, Clash Verge или FlClash."
     qrencode -t ANSIUTF8 -m 1 "$SUB_URL" || true
     echo
+    /usr/local/bin/kit __applinks "$SUB_URL" || true
+    echo
     KIT_NO_QR=1 /usr/local/bin/kit __links "$NAME" "$SUBID" || true
   else
     /usr/local/bin/kit __links "$NAME" "$SUBID" || true

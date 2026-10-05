@@ -142,6 +142,15 @@ direct_links() { # subId фильтр
 # Панель «через SSH-туннель»: подписка слушает только 127.0.0.1, с телефона по ней не зайти.
 local_only_sub() { [[ ${SUB_BASE:-} == http://127.0.0.1* || ${SUB_BASE:-} == http://localhost* ]]; }
 
+# Ссылки «открыть в приложении»: нажатие добавляет подписку сразу с названием (проверено: Karing и Happ).
+app_links() { # адрес подписки
+  local url=$1 enc
+  enc=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$url")
+  echo "Открыть в приложении (отправьте ссылку себе или близкому в мессенджер и нажмите):"
+  echo "  Karing: karing://install-config?url=$enc&name=3X-UI%20KIT"
+  echo "  Happ:   happ://add/$url"
+}
+
 show_link() { # имя subId
   local url
   url=$(sub_url "$2")
@@ -159,6 +168,8 @@ show_link() { # имя subId
   echo "$url"
   echo
   command -v qrencode >/dev/null && qrencode -t ANSIUTF8 -m 1 "$url"
+  app_links "$url"
+  echo
   echo "${D}Отдельные ссылки на каждый протокол: kit user link $1 --all${N}"
 }
 
@@ -2250,6 +2261,7 @@ case "$cmd_key" in
       inbound_patch "$_id" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x "$2" || true
     done < <(sni_targets | awk -F'\t' '$2 == "self" {print $1}') ;;
   "__links "*) links_block "${2:-}" "${3:-}" ;;
+  "__applinks "*) app_links "${2:-}" ;;
   "update "*) shift; cmd_update "$@" ;;
   "backup "*) cmd_backup ;;
   "check "*) shift; cmd_check "$@" ;;
