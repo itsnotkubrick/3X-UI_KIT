@@ -841,6 +841,9 @@ check_stealth() {
   if jq -e 'any(.[]; .protocol == "hysteria" and .enable == true)' <<<"$list" >/dev/null && [[ -z $(hy_masq_state) ]]; then
     c_warn "Hysteria2 на чужой HTTP/3-запрос отвечает не как сайт. Включить: kit net masq on"
   fi
+  if [[ -z $(jq -r '.subJsonDns // ""' <<<"$(api POST setting/all '{}' 2>/dev/null)" 2>/dev/null) ]]; then
+    c_warn "DNS в подписке Xray JSON обычный (UDP 8.8.8.8). Включить DoH через прокси: kit net dns on"
+  fi
   names=$(jq -r '[.[] | select(.enable == true and .listen != "127.0.0.1" and (.remark == "VLESS-WS" or .remark == "Trojan-gRPC" or .remark == "VMess-WS")) | .remark] | join(", ")' <<<"$list")
   [[ -z $names ]] || c_warn "$names открыты на своих портах и на чужой заход отвечают пустой страницей. Не нужны? kit net off имя (режим «всё на 443» их прячет за сайтом)"
 }
@@ -1642,6 +1645,32 @@ hy_masq() { # on|off
   fi
 }
 
+# ---------- DNS в подписках ----------
+# Clash/Mihomo: безопасный dns добавляет kit-sub. Xray JSON: dns берётся из настройки панели subJsonDns (по умолчанию – обычный
+# UDP на 8.8.8.8), ставим DoH. Запросы идут по правилам клиента, то есть через прокси.
+DNS_XRAY='{"servers":[{"address":"https://1.1.1.1/dns-query","skipFallback":false},{"address":"https://8.8.8.8/dns-query","skipFallback":true}],"queryStrategy":"UseIP","tag":"dns_out"}'
+
+net_dns() { # [on|off]
+  local act=${1:-} all cur
+  all=$(api POST setting/all '{}')
+  cur=$(jq -r '.subJsonDns // ""' <<<"$all")
+  case $act in
+    "")
+      if [[ -n $cur ]]; then echo "DNS в подписках: DoH через прокси (Clash – от kit-sub, Xray JSON – настройка панели). Выключить: kit net dns off"
+      else echo "DNS в подписке Xray JSON: обычный UDP 8.8.8.8 (по умолчанию панели). Включить DoH: kit net dns on"; fi ;;
+    on)
+      [[ -z $cur ]] || { say "DNS уже настроен (DoH)."; return 0; }
+      api POST setting/update "$(jq -c --arg d "$DNS_XRAY" '.subJsonDns = $d' <<<"$all")" >/dev/null || die "Панель не приняла настройку."
+      systemctl restart x-ui; panel_healthy || warn "Панель не ответила после перезапуска: проверьте kit check."
+      say "DNS в подписках: DoH через прокси. Клиенты подхватят при обновлении подписки." ;;
+    off)
+      api POST setting/update "$(jq -c '.subJsonDns = ""' <<<"$all")" >/dev/null || die "Панель не приняла настройку."
+      systemctl restart x-ui; panel_healthy || true
+      say "Вернул DNS панели по умолчанию." ;;
+    *) die "kit net dns [on|off]" ;;
+  esac
+}
+
 # ---------- kit net: протоколы, порты, сайт маскировки, отпечаток ----------
 
 net_main_name() { case $1 in REALITY | XHTTP | Hysteria2) return 0 ;; *) return 1 ;; esac; }
@@ -1761,8 +1790,9 @@ cmd_net() {
     off | on) net_toggle "${sub,,}" "$@" ;;
     fp) net_fp "$@" ;;
     masq) hy_masq "$@" ;;
+    dns) net_dns "$@" ;;
     vision) case ${1:-} in on) cmd_vision --all ;; off) cmd_vision --all off ;; *) die "kit net vision on|off" ;; esac ;;
-    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | vision on|off]" ;;
+    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | vision on|off]" ;;
   esac
 }
 

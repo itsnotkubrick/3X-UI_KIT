@@ -145,17 +145,47 @@ def add_auto(clash_yaml):
     cfg = yaml.safe_load(clash_yaml)
     if not isinstance(cfg, dict):
         return clash_yaml
-    names = [p["name"] for p in cfg.get("proxies") or [] if isinstance(p, dict) and p.get("name")]
+    allp = [p for p in cfg.get("proxies") or [] if isinstance(p, dict) and p.get("name")]
+    names = [p["name"] for p in allp]
+    # WireGuard и AmneziaWG разрешают имена сайтов на самом клиенте (по обычному UDP внутри туннеля), поэтому в автовыбор
+    # не входят: по умолчанию клиент идёт протоколами, где имя уходит на сервер. Вручную их выбрать по-прежнему можно.
+    auto_names = [p["name"] for p in allp if p.get("type") != "wireguard" and "amnezia-wg-option" not in p]
     groups = cfg.get("proxy-groups")
-    if len(names) < 2 or not isinstance(groups, list) or any(g.get("name") == AUTO_GROUP for g in groups if isinstance(g, dict)):
+    if len(auto_names) < 2 or not isinstance(groups, list) or any(g.get("name") == AUTO_GROUP for g in groups if isinstance(g, dict)):
         return clash_yaml
     groups.insert(0, {"name": AUTO_GROUP, "type": "url-test", "url": "http://www.gstatic.com/generate_204",
-                      "interval": 300, "tolerance": 100, "lazy": True, "proxies": names})
+                      "interval": 300, "tolerance": 100, "lazy": True, "proxies": auto_names})
     for g in groups[1:]:
         lst = g.get("proxies") if isinstance(g, dict) else None
         if g.get("type") == "select" and isinstance(lst, list) and any(x in names for x in lst):
             g["proxies"] = [AUTO_GROUP] + lst
             break
+    return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False).encode()
+
+
+# DNS в Clash-подписке: 3X-UI профиль без раздела dns не присылает, и как клиент будет разрешать имена, зависит от
+# самого приложения (системный DNS, возможны утечки). Добавляем безопасный вариант, если своего dns в профиле нет:
+# fake-ip, запросы идут как обычный трафик по правилам (то есть через прокси) и по DoH, без запасного локального DNS.
+# Адреса серверов имён – числовые, чтобы не нужен был ещё один запрос для их поиска.
+DNS_BLOCK = {
+    "enable": True,
+    "ipv6": False,
+    "enhanced-mode": "fake-ip",
+    "fake-ip-range": "198.18.0.1/16",
+    "fake-ip-filter": ["*.lan", "+.local"],
+    "respect-rules": True,
+    "default-nameserver": ["1.1.1.1", "8.8.8.8"],
+    "nameserver": ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"],
+    # Имена самих серверов (если сервер задан доменом) разрешаются напрямую, но по DoH.
+    "proxy-server-nameserver": ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"],
+}
+
+
+def add_dns(clash_yaml):
+    cfg = yaml.safe_load(clash_yaml)
+    if not isinstance(cfg, dict) or "dns" in cfg:
+        return clash_yaml
+    cfg["dns"] = dict(DNS_BLOCK)
     return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False).encode()
 
 
@@ -233,6 +263,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = strip_links(body)
             if code == 200 and clash and CONF.get("auto", True):
                 body = add_auto(body)
+            if code == 200 and clash and CONF.get("dns", True):
+                body = add_dns(body)
         except (yaml.YAMLError, UnicodeError) as e:
             log(f"не удалось обработать подписку: {e}")
 

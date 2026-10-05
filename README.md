@@ -104,6 +104,7 @@ kit net port имя порт                                  # сменить �
 kit net off имя  /  kit net on имя                     # выключить и включить протокол; kit net on reality2 – второй REALITY
 kit net fp firefox                                     # сменить отпечаток клиента у всех подключений
 kit net masq on                                        # Hysteria2 отвечает на чужой запрос страницей сайта
+kit net dns on                                         # DNS в подписке по DoH через прокси (ставится при установке)
 
 kit check [--deep] [--fix]                             # проверить сервер; --deep – ещё и подключиться клиентом, --fix – исправить безопасное
 kit update [--panel]                                   # обновить сейчас; --panel – панель 3X-UI до проверенной версии
@@ -265,6 +266,16 @@ sh -c "$(curl -sSL https://raw.githubusercontent.com/jameszeroX/XKeen/main/insta
 | Keenetic (XKeen) | Xray | `04_outbounds.json` и `05_routing.json`: серверы, выбор сервисов, реклама, свои сайты | [Открыть →](https://itsnotkubrick.github.io/3X-UI_KIT/tools/?core=xray) |
 | Keenetic (XKeen) | Mihomo | `config.yaml` с автовыбором сервера, подпиской, Hysteria2, AmneziaWG и веб-панелью | [Открыть →](https://itsnotkubrick.github.io/3X-UI_KIT/tools/?core=mihomo) |
 | OpenWrt (Nikki), бета | Mihomo | профиль для Nikki и команда, которая его включит | [Открыть →](https://itsnotkubrick.github.io/3X-UI_KIT/tools/?router=openwrt) |
+
+## Утечки DNS
+
+Подписка отдаёт приложению безопасный DNS: в Clash/Mihomo – `fake-ip` и DoH, который идёт по правилам (то есть через
+прокси), в Xray JSON – DoH вместо обычного UDP. Проверено на сервере: при подключении через REALITY, XHTTP, Shadowsocks
+и по JSON-подписке запросы имён наружу обычным DNS не уходят. Но многое решает само приложение, поэтому:
+
+1. Включите режим **TUN** (весь трафик устройства) и **удалённый DNS**, отключите «локальный DNS» и IPv6, если он не нужен.
+2. WireGuard и AmneziaWG приложение разрешает по обычному UDP внутри туннеля, поэтому в «Авто» они не входят (выбираются вручную).
+3. Проверьте на [dnsleaktest.com](https://dnsleaktest.com) или [ipleak.net](https://ipleak.net): DNS вашего провайдера там появляться не должен.
 
 ## Если связь пропала
 
