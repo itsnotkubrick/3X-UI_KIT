@@ -1678,6 +1678,179 @@ net_dns() { # [on|off]
   esac
 }
 
+# ---------- панель и подписка: по IP или по домену ----------
+# Со своим доменом (режим «всё на 443») заход по имени домена попадает к сайту-прикрытию. Панель и подписка по
+# умолчанию открываются по IP; `kit net panel domain` добавляет их и в блок домена (сертификат Let's Encrypt домена),
+# `kit net panel ip` возвращает как было. Пути у них секретные, как и на IP.
+
+PANEL_CONF=/etc/nginx/conf.d/kit.conf
+
+# Разбор и пересборка блока домена в конфиге nginx. info – домен, сертификат, ключ; render – новый текст конфига.
+panel_conf_py() {
+  python3 - "$@" <<'PY'
+import re, sys
+op, conf = sys.argv[1], sys.argv[2]
+text = open(conf).read()
+
+def match_brace(t, start):
+    depth = 0
+    for j in range(start, len(t)):
+        if t[j] == "{":
+            depth += 1
+        elif t[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+def servers(t):
+    out, i = [], 0
+    while True:
+        m = re.search(r"^server\s*\{", t[i:], re.M)
+        if not m:
+            return out
+        a = i + m.start()
+        b = match_brace(t, a)
+        out.append((a, b))
+        i = b
+
+blocks = servers(text)
+web = next((b for b in blocks if "server_name _;" in text[b[0]:b[1]]), None)
+steal = next((b for b in blocks if "server_name _;" not in text[b[0]:b[1]] and re.search(r"server_name\s+\S+;", text[b[0]:b[1]])), None)
+if steal is None:
+    sys.exit(2)
+sb = text[steal[0]:steal[1]]
+domain = re.search(r"server_name\s+(\S+);", sb).group(1)
+cert = re.search(r"ssl_certificate\s+(\S+);", sb).group(1)
+key = re.search(r"ssl_certificate_key\s+(\S+);", sb).group(1)
+port = re.search(r"listen\s+127\.0\.0\.1:(\d+)", sb).group(1)
+if op == "info":
+    print(domain, cert, key)
+    sys.exit(0)
+mode, sub_path, panel_path = sys.argv[3], sys.argv[4], sys.argv[5]
+def location(t, path):
+    m = re.search(r"^[ \t]*location\s+" + re.escape(path) + r"\s*\{", t, re.M)
+    if not m:
+        return ""
+    b = match_brace(t, m.end() - 1)
+    return t[m.start():b]
+if mode == "domain":
+    wb = text[web[0]:web[1]] if web else ""
+    locs = "\n".join(x for x in (location(wb, sub_path), location(wb, panel_path)) if x)
+    if not locs:
+        sys.exit(3)
+    new = f"""server {{
+    listen 127.0.0.1:{port} ssl http2 proxy_protocol;
+    server_name {domain};
+    ssl_certificate {cert};
+    ssl_certificate_key {key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+    server_tokens off;
+    absolute_redirect off;
+    access_log off;
+    # kit:panel-on-domain
+{locs}
+    location / {{
+        root /var/www/kit;
+        index index.html;
+    }}
+}}"""
+else:
+    new = f"""server {{
+    listen 127.0.0.1:{port} ssl http2;
+    server_name {domain};
+    ssl_certificate {cert};
+    ssl_certificate_key {key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
+    access_log off;
+    location / {{
+        root /var/www/kit;
+        index index.html;
+    }}
+}}"""
+sys.stdout.write(text[:steal[0]] + new + text[steal[1]:])
+PY
+}
+
+kit_env_set() { # ключ значение: меняет или добавляет строку в /etc/kit/kit.env
+  python3 - "$KIT_ENV" "$1" "$2" <<'PY'
+import re, shlex, sys
+p, k, v = sys.argv[1:4]
+lines = open(p).read().splitlines()
+new = f"{k}={shlex.quote(v)}"
+for i, l in enumerate(lines):
+    if l.startswith(k + "="):
+        lines[i] = new
+        break
+else:
+    lines.append(new)
+open(p, "w").write("\n".join(lines) + "\n")
+PY
+}
+
+net_panel() { # [domain|ip]
+  local want=${1:-} info domain cert key cur new tmp bak rid panel_path old_host new_host all
+  [[ ${SINGLE:-no} == yes && -f $PANEL_CONF ]] || die "Работает в режиме «всё на 443» со своим доменом (--domain при установке)."
+  info=$(panel_conf_py info "$PANEL_CONF") || die "В настройках nginx нет блока своего домена: панель по домену доступна только при установке с --domain."
+  read -r domain cert key <<<"$info"
+  cur=${PANEL_ON:-ip}
+  if [[ -z $want ]]; then
+    if [[ $cur == domain ]]; then echo "Панель и подписка открываются по домену $domain (вернуть на IP: kit net panel ip)"
+    else echo "Панель и подписка открываются по IP ${HOST:-?}; домен $domain – сайт-прикрытие (открывать и по домену: kit net panel domain)"; fi
+    return 0
+  fi
+  [[ $want == domain || $want == ip ]] || die "kit net panel [domain|ip]"
+  [[ $want != "$cur" ]] || { say "Уже так: панель и подписка по $([[ $want == domain ]] && echo "домену $domain" || echo "IP")."; return 0; }
+  panel_path=/${XUI_WEB_BASE_PATH#/}; panel_path=${panel_path%/}/
+  if [[ $want == domain ]]; then
+    getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | grep -qx "$(host_ip)" || die "Домен $domain не указывает на этот сервер ($(host_ip)). Исправьте A-запись и повторите."
+    [[ -s $cert && -s $key ]] || die "Нет сертификата домена ($cert) – не трогаю nginx."
+  fi
+  tmp=$(mktemp); bak=$(mktemp); cp -p "$PANEL_CONF" "$bak"
+  panel_conf_py render "$PANEL_CONF" "$want" "$SUB_PATH" "$panel_path" >"$tmp" || { rm -f "$tmp" "$bak"; die "Не удалось собрать настройки nginx. Ничего не изменилось."; }
+  rid=$(sni_targets | awk -F'\t' '$2 == "self" && $3 == "REALITY" {print $1; exit}')
+  [[ -n $rid ]] || { rm -f "$tmp" "$bak"; die "Не нашёл REALITY со своим доменом."; }
+  # Передача настоящего IP клиента сайту домена (PROXY protocol) нужна, чтобы панель видела, кто заходит.
+  local xv=0; [[ $want == domain ]] && xv=1
+  panel_revert() { cat "$bak" >"$PANEL_CONF"; inbound_patch "$rid" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x "$((1 - xv))" || true; nginx -t >/dev/null 2>&1 && systemctl reload nginx || true; }
+  if [[ $want == domain ]]; then
+    cat "$tmp" >"$PANEL_CONF"
+    nginx -t >/dev/null 2>&1 || { cat "$bak" >"$PANEL_CONF"; rm -f "$tmp" "$bak"; die "nginx не принял настройки. Ничего не изменилось."; }
+    inbound_patch "$rid" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x 1 || { cat "$bak" >"$PANEL_CONF"; rm -f "$tmp" "$bak"; die "Панель не приняла изменение. Ничего не изменилось."; }
+    systemctl reload nginx || { panel_revert; rm -f "$tmp" "$bak"; die "nginx не перезагрузился. Всё возвращено."; }
+  else
+    inbound_patch "$rid" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x 0 || { rm -f "$tmp" "$bak"; die "Панель не приняла изменение. Ничего не изменилось."; }
+    cat "$tmp" >"$PANEL_CONF"
+    if ! nginx -t >/dev/null 2>&1 || ! systemctl reload nginx; then panel_revert; rm -f "$tmp" "$bak"; die "nginx не принял настройки. Всё возвращено."; fi
+  fi
+  rm -f "$tmp" "$bak"
+  # Ссылки: адрес подписки в kit, панели и файле с данными входа.
+  old_host=${HOST}; new_host=$domain
+  if [[ $want == ip ]]; then old_host=$domain; new_host=${HOST}; fi
+  kit_env_set PANEL_ON "$want"
+  kit_env_set SUB_BASE "https://$([[ $want == domain ]] && echo "$domain" || echo "$HOST")${SUB_PATH}"
+  all=$(api POST setting/all '{}')
+  api POST setting/update "$(jq -c --arg u "https://$([[ $want == domain ]] && echo "$domain" || echo "$HOST")${SUB_PATH}" '.subURI = $u' <<<"$all")" >/dev/null || warn "Не обновил адрес подписки в панели."
+  [[ -f /root/3x-ui.txt ]] && python3 - /root/3x-ui.txt "https://$old_host" "https://$new_host" <<'PY'
+import sys
+p, a, b = sys.argv[1:4]
+s = open(p).read()
+open(p, "w").write(s.replace(a + "/", b + "/").replace(a + ":", b + ":"))
+PY
+  if [[ $want == domain ]]; then
+    say "Панель и подписка теперь открываются и по домену $domain."
+    echo "Панель:   https://$domain$panel_path"
+    echo "Подписка: https://$domain${SUB_PATH}ПОДПИСКА_ПОЛЬЗОВАТЕЛЯ  (ссылки: kit user link имя)"
+    echo "По IP они тоже работают. Вернуть как было: kit net panel ip"
+  else
+    say "Панель и подписка снова только по IP ${HOST}."
+    echo "Панель:   https://${HOST}$panel_path"
+  fi
+}
+
 # ---------- kit net: протоколы, порты, сайт маскировки, отпечаток ----------
 
 net_main_name() { case $1 in REALITY | XHTTP | Hysteria2) return 0 ;; *) return 1 ;; esac; }
@@ -1731,6 +1904,9 @@ net_show() {
   [[ $shown_reality2 == yes ]] || printf '  %s %s %s %s\n' "$(padr REALITY-2 20)" "$(padr – 12)" "$(padr выкл 8)" "включить: kit net on reality2"
   echo
   echo "Отпечаток клиента: ${fpl:-?} (сменить: kit net fp firefox)"
+  if [[ ${SINGLE:-no} == yes && -f $PANEL_CONF ]] && panel_conf_py info "$PANEL_CONF" >/dev/null 2>&1; then
+    net_panel
+  fi
   if jq -e 'any(.[]; .protocol == "hysteria")' <<<"$list" >/dev/null; then
     if [[ -n $(hy_masq_state) ]]; then echo "Hysteria2 отвечает на посторонний запрос страницей сайта (выключить: kit net masq off)"
     else echo "Hysteria2 без маскировки под сайт (включить: kit net masq on)"; fi
@@ -1798,8 +1974,9 @@ cmd_net() {
     fp) net_fp "$@" ;;
     masq) hy_masq "$@" ;;
     dns) net_dns "$@" ;;
+    panel) net_panel "$@" ;;
     vision) case ${1:-} in on) cmd_vision --all ;; off) cmd_vision --all off ;; *) die "kit net vision on|off" ;; esac ;;
-    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | vision on|off]" ;;
+    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | panel domain|ip | vision on|off]" ;;
   esac
 }
 
@@ -1928,6 +2105,11 @@ n_toggle() {
     *) net_toggle on "$PICK" ;;
   esac
 }
+n_panel() {
+  net_panel
+  ask_num "1 – открывать по домену, 2 – только по IP, Enter – оставить: "
+  case $REPLY in 1) net_panel domain ;; 2) net_panel ip ;; esac
+}
 n_fp() {
   local -a fps=(chrome firefox safari edge ios android qq 360 random randomized); local i
   for i in "${!fps[@]}"; do printf '  %2d  %s\n' "$((i + 1))" "${fps[$i]}"; done
@@ -1940,8 +2122,8 @@ menu_net() {
   local c
   while :; do
     echo
-    box "Протоколы, порты и маскировка" "1. Показать протоколы и порты" "2. Сменить сайт маскировки" "3. Сменить порт протокола" "4. Выключить или включить протокол" "5. Сменить отпечаток клиента" "6. Второй REALITY на высоком порту" "" "0. Назад"
-    ask_num "Выбор [0-6]: "; c=$REPLY
+    box "Протоколы, порты и маскировка" "1. Показать протоколы и порты" "2. Сменить сайт маскировки" "3. Сменить порт протокола" "4. Выключить или включить протокол" "5. Сменить отпечаток клиента" "6. Второй REALITY на высоком порту" "7. Панель и подписка: по IP или по домену" "" "0. Назад"
+    ask_num "Выбор [0-7]: "; c=$REPLY
     case $c in
       1) run_action net_show; pause ;;
       2) run_action n_site; pause ;;
@@ -1949,6 +2131,7 @@ menu_net() {
       4) run_action n_toggle; pause ;;
       5) run_action n_fp; pause ;;
       6) run_action net_toggle on reality2; pause ;;
+      7) run_action n_panel; pause ;;
       0 | "") return 0 ;;
       *) echo "Нет такого пункта." ;;
     esac

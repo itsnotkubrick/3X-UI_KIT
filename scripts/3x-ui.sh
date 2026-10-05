@@ -65,6 +65,7 @@ declare -A INNER=([reality]=10443 [xhttp]=10444 [mtproto]=10445 [web]=10446 [sel
 SNI2=""; SNI3=""
 # Свой домен (self-steal): REALITY маскируется под сайт на этом же сервере, а не под чужой.
 DOMAIN=""
+PANEL_ON=ip     # где открываются панель и подписка: ip или domain (domain – только со своим доменом)
 LINK_HOST=""   # адрес в ссылках: свой домен, если он выбран, иначе IP
 DOMAIN_CERT_DIR=/root/cert/domain
 SELF_IP_CERT=no   # yes – сертификат на IP самоподписанный (Let's Encrypt отказал, пользователь согласился)
@@ -210,6 +211,20 @@ ask_tty() { # приглашение; ответ – в REPLY; не 0, если 
   read -r -p "$1" REPLY </dev/tty || { REPLY=""; return 1; }
 }
 
+# Где открывать панель и подписку, если выбран свой домен.
+panel_on_choice() {
+  [[ $PANEL_ON == domain ]] && return 0
+  echo
+  echo "${B}Где открывать панель и подписку?${N}"
+  echo "  ${B}1${N}  По IP        https://$HOST/…   как раньше ${G}[по умолчанию]${N}"
+  echo "  ${B}2${N}  По домену    https://$DOMAIN/…  сертификат домена, ссылка не зависит от IP"
+  echo "     ${D}Менять можно потом: kit net panel domain | ip${N}"
+  ask_tty "Выбор [1]: " || return 0
+  REPLY=${REPLY//[[:space:]]/}
+  [[ ${REPLY%.} == 2 ]] && PANEL_ON=domain
+  return 0
+}
+
 # Вопрос пользователю: свой домен, сосед по подсети (по умолчанию) или свой сайт.
 choose_masking() {
   echo
@@ -242,7 +257,7 @@ choose_masking() {
     [[ -n $d ]] || d=$prev
     [[ -n $d ]] || return 0
     if [[ ! $d =~ $re_host ]]; then warn "Это не похоже на домен (нужно только имя, без https://). Пример: vpn.example.com"; prev=""; continue; fi
-    if domain_points_here "$d"; then DOMAIN=$d; return 0; fi
+    if domain_points_here "$d"; then DOMAIN=$d; panel_on_choice; return 0; fi
     prev=$d
     ask_tty "Enter – проверить ещё раз (DNS обновляется не сразу), s – стандартный сайт, q – выйти: " || return 0
     REPLY=${REPLY//[[:space:]]/}
@@ -400,7 +415,7 @@ main() {
   local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no restore=""
   while [[ $# -gt 0 ]]; do
     case $1 in
-      --port | --sni | --panel-ssl | --host | --user | --protocols | --domain | --cert | --key | --restore)
+      --port | --sni | --panel-ssl | --host | --user | --protocols | --domain | --cert | --key | --restore | --panel-on)
         [[ -n ${2-} ]] || die "У параметра $1 нет значения (см. --help)" ;;
     esac
     case $1 in
@@ -415,6 +430,7 @@ main() {
       --multi-port) multi=yes; shift ;;
       --key) ukey=$2; shift 2 ;;
       --restore) restore=$2; shift 2 ;;
+      --panel-on) PANEL_ON=${2,,}; shift 2 ;;
       --no-ufw) UFW=no; shift ;;
       -y|--yes) yes=yes; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -443,6 +459,8 @@ main() {
   [[ -z $DOMAIN || $DOMAIN =~ $re_host ]] || die "--domain: нужно имя вашего домена, например vpn.example.com"
   [[ -z $DOMAIN || -z $SNI ]] || die "--sni и --domain вместе не нужны: выберите либо чужой сайт (--sni), либо свой домен (--domain)."
   [[ -z $DOMAIN || $multi == no ]] || die "Свой домен работает только в режиме «всё на 443» – уберите --multi-port."
+  [[ $PANEL_ON == ip || $PANEL_ON == domain ]] || die "--panel-on: ip или domain"
+  [[ $PANEL_ON == ip || -n $DOMAIN || $yes == no ]] || die "--panel-on domain работает только со своим доменом (--domain vpn.example.com)."
   [[ -z $HOST || $HOST =~ $re_host || $HOST =~ ^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$ ]] || die "--host: нужен IP (например 1.2.3.4) или домен"
   [[ $NAME =~ ^[A-Za-z0-9_.-]{1,32}$ ]] || die "Имя: латиница, цифры, _ . - (до 32 символов)."
   [[ $PANEL_SSL =~ ^(auto|ip|none)$ ]] || die "--panel-ssl: auto, ip или none"
@@ -550,6 +568,7 @@ main() {
     die "$SNI не отвечает по TLS 1.3 + HTTP/2 – REALITY с ним работать не будет. Выберите другой сайт."
   fi
   LINK_HOST=${DOMAIN:-$HOST}
+  [[ $PANEL_ON == ip || -n $DOMAIN ]] || { PANEL_ON=ip; later "--panel-on domain нужен со своим доменом: панель и подписка открываются по IP."; }
   # Режим «всё на 443»: XHTTP и MTProto различаются по имени сайта, берём и им соседей по подсети.
   if [[ $TRUSTED == yes && $multi == no && ( -z $SNI2 || -z $SNI3 ) ]]; then
     local -a nb2=()
@@ -667,6 +686,9 @@ main() {
 
   step "Защита и обновления"
   install_kit_cli
+  if [[ $PANEL_ON == domain ]]; then
+    /usr/local/bin/kit net panel domain >/dev/null 2>&1 || { PANEL_ON=ip; later "Панель и подписку по домену включить не удалось: оставил по IP. Попробуйте позже: kit net panel domain"; }
+  fi
   brand_xui_menu
   # Автообновление kit и kit-sub: только подписанные релизы, выключается kit update --manual.
   /usr/local/bin/kit update --auto >/dev/null 2>&1 || later "Автообновление не включилось – включите позже: kit update --auto"
@@ -697,8 +719,10 @@ main() {
 
   # --- итог ---
   local panel_url links
+  local ph=$HOST
+  if [[ $PANEL_ON == domain ]]; then ph=$DOMAIN; SUB_URL=${SUB_URL/\/\/$HOST\//\/\/$DOMAIN\/}; fi
   if [[ $SINGLE == yes ]]; then
-    panel_url="https://$HOST/${XUI_WEB_BASE_PATH#/}"
+    panel_url="https://$ph/${XUI_WEB_BASE_PATH#/}"
     panel_url="${panel_url%/}/"
   elif [[ $TRUSTED == yes ]]; then
     panel_url="https://$HOST:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH"
@@ -1232,6 +1256,7 @@ install_kit_cli() {
   {
     printf 'HOST=%q\n' "$HOST"
     printf 'LINK_HOST=%q\n' "${LINK_HOST:-$HOST}"
+    printf 'PANEL_ON=%q\n' "ip"
     printf 'SUB_BASE=%q\n' "${SUB_URL%$SUBID}"
     printf 'SUB_PATH=%q\n' "$SUB_PATH"
     printf 'SUB_INTERNAL=%q\n' "${SUB_INTERNAL:-$SUB_PORT}"
@@ -1787,6 +1812,11 @@ PY
 
   if [[ -f /etc/kit/kit.env ]]; then
     install_kit_file
+    # Панель по домену: nginx собран заново, значит блок домена нужно вернуть (домен должен указывать на этот сервер).
+    if grep -q '^PANEL_ON=domain' /etc/kit/kit.env; then
+      sed -i 's/^PANEL_ON=.*/PANEL_ON=ip/' /etc/kit/kit.env
+      /usr/local/bin/kit net panel domain >/dev/null 2>&1 || warn "Панель по домену не включилась (домен должен указывать на этот сервер): kit net panel domain"
+    fi
     brand_xui_menu
     /usr/local/bin/kit update --auto >/dev/null 2>&1 || later "Автообновление не включилось – включите позже: kit update --auto"
     /usr/local/bin/kit __limit-timer on >/dev/null 2>&1 || later "Проверка общего лимита трафика не включилась – включите позже: kit fix"
@@ -1843,6 +1873,7 @@ usage() {
   --user admin        имя первого клиента
   --host 1.2.3.4      адрес в ссылке, если IP определился неверно
   --restore файл      поднять сервер из резервной копии kit backup (на чистом VPS)
+  --panel-on ip|domain панель и подписка по IP (по умолчанию) или по своему домену (нужен --domain)
   --no-ufw            не трогать файрвол
   -y                  не задавать вопросов
 EOF
