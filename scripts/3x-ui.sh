@@ -283,7 +283,15 @@ issue_domain_cert() {
   port_busy 80 tcp && { warn "Порт 80/tcp занят: Let's Encrypt не сможет проверить домен $DOMAIN."; return 1; }
   say "Получаю сертификат Let's Encrypt для ${B}$DOMAIN${N}"
   install -m 600 /dev/null "$log"
-  "$acme" --issue -d "$DOMAIN" --standalone --httpport 80 --server letsencrypt --keylength ec-256 >"$log" 2>&1 || rc=$?
+  # Сбои бывают временными (например, ошибка TLS при скачивании готового сертификата): до трёх попыток.
+  local try
+  for try in 1 2 3; do
+    rc=0
+    "$acme" --issue -d "$DOMAIN" --standalone --httpport 80 --server letsencrypt --keylength ec-256 ${rc_force:-} >>"$log" 2>&1 || rc=$?
+    [[ $rc == 0 || $rc == 2 ]] && break
+    local rc_force="--force"
+    sleep 10
+  done
   # 2 – сертификат уже свежий, выпускать заново не нужно.
   [[ $rc == 0 || $rc == 2 ]] || { warn "Let's Encrypt не выдал сертификат для $DOMAIN. Обычно дело в одном из трёх: A-запись ещё не обновилась, порт 80 закрыт у хостера или домен за проксированием Cloudflare. Лог: $log"; return 1; }
   # Каталог и ключ – только для root (nginx читает их от root).
