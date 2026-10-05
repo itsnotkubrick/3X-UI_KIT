@@ -556,6 +556,7 @@ needs_migration() {
   [[ -f /etc/systemd/system/kit-sub.service ]] && ! grep -q '^DynamicUser=yes' /etc/systemd/system/kit-sub.service && return 0
   [[ ! -f $KIT_MANUAL ]] && ! auto_enabled && return 0
   limit_timer_enabled || return 0
+  [[ -f /etc/kit-sub/config.json ]] && ! jq -e 'has("extra_paths")' /etc/kit-sub/config.json >/dev/null 2>&1 && return 0
   return 1
 }
 
@@ -682,6 +683,8 @@ cmd_update() {
 
   # Через rename: bash дочитывает текущий kit по ходу работы, его файл трогать нельзя.
   install -m 755 "$tmp/kit.sh" /usr/local/bin/kit.new && mv -f /usr/local/bin/kit.new /usr/local/bin/kit
+  # Новые пути подписки (Clash и JSON) подключает уже новая версия kit.
+  /usr/local/bin/kit __subextra >/dev/null 2>&1 || warn "Дополнительные пути подписки не подключились: kit update --force"
   echo
   echo "${G}✓ Готово: 3X-UI KIT $latest.${N} Пользователи, ссылки и подписки не менялись."
   [[ $unattended == yes ]] && return
@@ -1743,6 +1746,28 @@ def servers(t):
 blocks = servers(text)
 web = next((b for b in blocks if "server_name _;" in text[b[0]:b[1]]), None)
 steal = next((b for b in blocks if "server_name _;" not in text[b[0]:b[1]] and re.search(r"server_name\s+\S+;", text[b[0]:b[1]])), None)
+def location(t, path):
+    m = re.search(r"^[ \t]*location\s+" + re.escape(path) + r"\s*\{", t, re.M)
+    if not m:
+        return ""
+    b = match_brace(t, m.end() - 1)
+    return t[m.start():b]
+if op == "addloc":
+    # addloc конфиг путь-подписки доп.пути…: в блок сайта по IP добавляются места для доп. путей (копия места подписки)
+    if web is None:
+        sys.exit(2)
+    wt = text[web[0]:web[1]]
+    base = location(wt, sys.argv[3])
+    if not base:
+        sys.exit(3)
+    new_wt = wt
+    for e in sys.argv[4:]:
+        if location(new_wt, e):
+            continue
+        copy = base.replace(sys.argv[3], e, 1)
+        new_wt = new_wt.replace(base, base + "\n" + copy, 1)
+    sys.stdout.write(text[:web[0]] + new_wt + text[web[1]:])
+    sys.exit(0)
 if steal is None:
     sys.exit(2)
 sb = text[steal[0]:steal[1]]
@@ -1754,15 +1779,10 @@ if op == "info":
     print(domain, cert, key)
     sys.exit(0)
 mode, sub_path, panel_path = sys.argv[3], sys.argv[4], sys.argv[5]
-def location(t, path):
-    m = re.search(r"^[ \t]*location\s+" + re.escape(path) + r"\s*\{", t, re.M)
-    if not m:
-        return ""
-    b = match_brace(t, m.end() - 1)
-    return t[m.start():b]
+extras = sys.argv[6:]
 if mode == "domain":
     wb = text[web[0]:web[1]] if web else ""
-    locs = "\n".join(x for x in (location(wb, sub_path), location(wb, panel_path)) if x)
+    locs = "\n".join(x for x in [location(wb, sub_path), location(wb, panel_path)] + [location(wb, e) for e in extras] if x)
     if not locs:
         sys.exit(3)
     new = f"""server {{
@@ -1817,6 +1837,36 @@ open(p, "w").write("\n".join(lines) + "\n")
 PY
 }
 
+# Страница подписки в браузере показывает ещё два адреса (Clash и JSON) с отдельными секретными путями. Пропускаем их через
+# kit-sub (те же «Авто» и DNS) и через nginx. Повторный запуск безопасен.
+sub_extra_sync() {
+  local cfg=/etc/kit-sub/config.json all jp cp extras tmp bak panel_path
+  [[ -f $cfg ]] || return 0
+  all=$(api POST setting/all '{}')
+  jp=$(jq -r '.subJsonPath // ""' <<<"$all"); cp=$(jq -r '.subClashPath // ""' <<<"$all")
+  extras=$(jq -nc --arg a "$jp" --arg b "$cp" --arg s "${SUB_PATH:-}" '[$a, $b] | map(select(. != "" and . != "/")) | map("/" + (ltrimstr("/") | rtrimstr("/")) + "/")
+    | map(select(test("^/[A-Za-z0-9_-]+/$") and . != $s)) | unique')
+  tmp=$(mktemp)
+  jq --argjson e "$extras" '.extra_paths = $e' "$cfg" >"$tmp" && install -m 600 "$tmp" "$cfg"
+  rm -f "$tmp"
+  if [[ ${SINGLE:-no} == yes && -f $PANEL_CONF ]]; then
+    local -a ex=()
+    mapfile -t ex < <(jq -r '.[]' <<<"$extras")
+    tmp=$(mktemp); bak=$(mktemp); cp -p "$PANEL_CONF" "$bak"
+    if panel_conf_py addloc "$PANEL_CONF" "$SUB_PATH" "${ex[@]}" >"$tmp" && [[ -s $tmp ]]; then
+      cat "$tmp" >"$PANEL_CONF"
+      if [[ ${PANEL_ON:-ip} == domain ]]; then
+        panel_path=/${XUI_WEB_BASE_PATH#/}; panel_path=${panel_path%/}/
+        panel_conf_py render "$PANEL_CONF" domain "$SUB_PATH" "$panel_path" "${ex[@]}" >"$tmp" && [[ -s $tmp ]] && cat "$tmp" >"$PANEL_CONF"
+      fi
+      if nginx -t >/dev/null 2>&1; then systemctl reload nginx
+      else cat "$bak" >"$PANEL_CONF"; warn "nginx не принял новые пути подписки – оставил прежние настройки."; fi
+    fi
+    rm -f "$tmp" "$bak"
+  fi
+  systemctl restart kit-sub
+}
+
 net_panel() { # [domain|ip]
   local want=${1:-} info domain cert key cur new tmp bak rid panel_path old_host new_host all
   [[ ${SINGLE:-no} == yes && -f $PANEL_CONF ]] || die "Работает в режиме «всё на 443» со своим доменом (--domain при установке)."
@@ -1836,7 +1886,9 @@ net_panel() { # [domain|ip]
     [[ -s $cert && -s $key ]] || die "Нет сертификата домена ($cert) – не трогаю nginx."
   fi
   tmp=$(mktemp); bak=$(mktemp); cp -p "$PANEL_CONF" "$bak"
-  panel_conf_py render "$PANEL_CONF" "$want" "$SUB_PATH" "$panel_path" >"$tmp" || { rm -f "$tmp" "$bak"; die "Не удалось собрать настройки nginx. Ничего не изменилось."; }
+  local -a ex=()
+  mapfile -t ex < <(jq -r '.extra_paths[]?' /etc/kit-sub/config.json 2>/dev/null || true)
+  panel_conf_py render "$PANEL_CONF" "$want" "$SUB_PATH" "$panel_path" "${ex[@]}" >"$tmp" || { rm -f "$tmp" "$bak"; die "Не удалось собрать настройки nginx. Ничего не изменилось."; }
   local -a rids=()
   mapfile -t rids < <(sni_targets | awk -F'\t' '$2 == "self" {print $1}')
   ((${#rids[@]})) || { rm -f "$tmp" "$bak"; die "Не нашёл REALITY со своим доменом."; }
@@ -2267,6 +2319,7 @@ case "$cmd_key" in
       inbound_patch "$_id" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x "$2" || true
     done < <(sni_targets | awk -F'\t' '$2 == "self" {print $1}') ;;
   "__links "*) links_block "${2:-}" "${3:-}" ;;
+  "__subextra "*) sub_extra_sync ;;
   "__applinks "*) app_links "${2:-}" ;;
   "update "*) shift; cmd_update "$@" ;;
   "backup "*) cmd_backup ;;

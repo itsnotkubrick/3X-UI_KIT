@@ -53,15 +53,17 @@ PASS_HEADERS = ("content-type", "content-disposition", "profile-title", "profile
 with open(CONFIG, encoding="utf-8") as f:
     CONF = json.load(f)
 PATH = "/" + CONF["path"].strip("/") + "/"
+# Дополнительные пути, которые панель показывает на странице подписки (Clash и JSON): обрабатываются так же, как основной.
+EXTRA = ["/" + x.strip("/") + "/" for x in CONF.get("extra_paths", []) if isinstance(x, str) and re.fullmatch(r"/?[A-Za-z0-9_-]+/?", x)]
 
 
 def log(msg):
     print(msg, flush=True)
 
 
-def upstream(sub_id, ua, host, accept):
+def upstream(sub_id, ua, host, accept, prefix=None):
     """GET к подписке 3X-UI. Возвращает (код, заголовки, тело) или (None, {}, b"")."""
-    req = urllib.request.Request(CONF["upstream"].rstrip("/") + PATH + sub_id, headers={
+    req = urllib.request.Request(CONF["upstream"].rstrip("/") + (prefix or PATH) + sub_id, headers={
         "User-Agent": ua, "Host": host, "Accept": accept or "*/*"})
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -248,19 +250,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if not path.startswith(PATH):
+        prefix = next((x for x in (PATH, *EXTRA) if path.startswith(x)), None)
+        if prefix is None:
             return self.send_html_error(404)
-        sub_id = path[len(PATH):]
-        if not SUB_ID.match(sub_id) and not ASSET.match(sub_id):
+        sub_id = path[len(prefix):]
+        if not SUB_ID.match(sub_id) and not (prefix == PATH and ASSET.match(sub_id)):
             return self.send_html_error(404)
         ua = self.headers.get("User-Agent", "")
         host = CONF.get("link_host") or self.headers.get("Host", CONF.get("host", ""))
         accept = self.headers.get("Accept", "")
-        code, headers, body = upstream(sub_id, ua, host, accept)
+        code, headers, body = upstream(sub_id, ua, host, accept, prefix)
         if code is None:
             return self.send_html_error(502)
 
-        clash = bool(CLASH_UA.search(ua)) and "yaml" in headers.get("content-type", "")
+        clash = (bool(CLASH_UA.search(ua)) or prefix != PATH) and "yaml" in headers.get("content-type", "")
         awg = clash and not NO_AWG_UA.search(ua)
         # В журнал – только приложение и что ему отдали, без IP.
         log(f"{ua[:80]!r} → {'clash+awg' if awg else 'clash' if clash else headers.get('content-type', '?').split(';')[0]}")
@@ -269,7 +272,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = strip_awg(body)
             elif code == 200 and awg and not sub_id.endswith(("-awg", "-tg")):
                 # Установки до kit 1.1 держали AmneziaWG в подписке «<id>-awg» – подмешиваем её.
-                acode, _, abody = upstream(sub_id + "-awg", ua, host, accept)
+                acode, _, abody = upstream(sub_id + "-awg", ua, host, accept, prefix)
                 if acode == 200 and abody:
                     body = merge_awg(body, abody)
             elif code == 200 and "text/plain" in headers.get("content-type", ""):

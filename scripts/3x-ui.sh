@@ -701,6 +701,9 @@ main() {
 
   step "Защита и обновления"
   install_kit_cli
+  if [[ $TRUSTED == yes ]]; then
+    /usr/local/bin/kit __subextra >/dev/null 2>&1 || later "Адреса Clash и JSON на странице подписки не подключились: kit update --force"
+  fi
   if [[ $PANEL_ON == domain ]]; then
     /usr/local/bin/kit net panel domain >/dev/null 2>&1 || { PANEL_ON=ip; later "Панель и подписку по домену включить не удалось: оставил по IP. Попробуйте позже: kit net panel domain"; }
   fi
