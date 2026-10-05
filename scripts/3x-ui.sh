@@ -1695,7 +1695,7 @@ restore_main() { # файл
   trap "rm -rf -- '$tmp'" EXIT
   python3 - "$file" "$tmp" <<'PY' || die "Это не резервная копия 3X-UI KIT или она повреждена. Ничего не менял."
 import os, sys, tarfile
-allowed = ("etc/x-ui/x-ui.db", "etc/x-ui/install-result.env", "etc/kit/kit.env", "etc/kit-sub/config.json",
+allowed = ("etc/x-ui/x-ui.db", "etc/x-ui/install-result.env", "etc/kit/kit.env", "etc/kit-sub/config.json", "etc/kit-sub/rules.yaml",
            "etc/nginx/kit-stream.conf", "etc/nginx/conf.d/kit.conf", "var/www/kit", "root/cert/self",
            "root/cert/custom", "root/3x-ui.txt", "kit-backup.env")
 parents = {"etc", "etc/x-ui", "etc/kit", "etc/kit-sub", "etc/nginx", "etc/nginx/conf.d", "var", "var/www", "root", "root/cert"}
@@ -1796,7 +1796,9 @@ PY
     install -m 644 "$tmp/root/cert/$c/fullchain.pem" "/root/cert/$c/fullchain.pem"
     install -m 600 "$tmp/root/cert/$c/privkey.pem" "/root/cert/$c/privkey.pem"
   done
-  install -d -m 700 /etc/kit /etc/kit-sub
+  install -d -m 700 /etc/kit
+  install -d -m 755 /etc/kit-sub  # kit-sub (без root) читает rules.yaml
+  [[ -f $tmp/etc/kit-sub/rules.yaml ]] && install -m 644 "$tmp/etc/kit-sub/rules.yaml" /etc/kit-sub/rules.yaml
   [[ -f $tmp/etc/kit/kit.env ]] && install -m 600 "$tmp/etc/kit/kit.env" /etc/kit/kit.env
   [[ -f $tmp/root/3x-ui.txt ]] && install -m 600 "$tmp/root/3x-ui.txt" "$RESULT"
   if [[ -n $old_ip ]]; then

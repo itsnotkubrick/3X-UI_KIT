@@ -20,6 +20,7 @@ import json
 import os
 import re
 import socket
+import sys
 import ssl
 import threading
 import time
@@ -53,6 +54,14 @@ PASS_HEADERS = ("content-type", "content-disposition", "profile-title", "profile
 with open(CONFIG, encoding="utf-8") as f:
     CONF = json.load(f)
 PATH = "/" + CONF["path"].strip("/") + "/"
+# Раздельная маршрутизация (необязательно): /etc/kit-sub/rules.yaml – через VPN только перечисленное, остальное напрямую.
+# Файл читается при каждом запросе подписки, перезапуск не нужен. Нет файла или он битый – подписка как обычно (всё через VPN).
+RULES_FILE = os.environ.get("KIT_SUB_RULES") or "/etc/kit-sub/rules.yaml"
+RULES_MAX_BYTES, RULES_MAX_COUNT = 65536, 300
+RULE_RE = re.compile(r"^(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|GEOSITE|IP-CIDR|IP-CIDR6|GEOIP),([A-Za-z0-9._:/!@+-]{1,120})$")
+DOH_RE = re.compile(r"^https://[A-Za-z0-9.-]{1,100}(:\d{1,5})?/[A-Za-z0-9._/-]{0,60}$")
+DOH_DEFAULT = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"]
+PRIVATE_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"]
 # Дополнительные пути, которые панель показывает на странице подписки (Clash и JSON): обрабатываются так же, как основной.
 EXTRA = ["/" + x.strip("/") + "/" for x in CONF.get("extra_paths", []) if isinstance(x, str) and re.fullmatch(r"/?[A-Za-z0-9_-]+/?", x)]
 
@@ -193,6 +202,87 @@ def add_dns(clash_yaml):
     return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False).encode()
 
 
+def load_rules(report=None):
+    """Читает RULES_FILE: список via_vpn («ТИП,ЗНАЧЕНИЕ») и необязательный direct_dns (адреса DoH для остального).
+    Возвращает (правила, direct_dns) или None, если файла нет или он непригоден: тогда подписка остаётся прежней."""
+    say = report or log
+    try:
+        with open(RULES_FILE, "rb") as f:
+            raw = f.read(RULES_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        say(f"правила: не удалось прочитать {RULES_FILE}: {e}")
+        return None
+    if len(raw) > RULES_MAX_BYTES:
+        say(f"правила: файл больше {RULES_MAX_BYTES // 1024} КБ – не применяю")
+        return None
+    try:
+        data = yaml.safe_load(raw.decode("utf-8")) or {}
+    except (yaml.YAMLError, UnicodeError) as e:
+        say(f"правила: файл не разобран ({e}) – не применяю")
+        return None
+    items = data.get("via_vpn") if isinstance(data, dict) else None
+    if not isinstance(items, list) or not items:
+        say("правила: нет списка via_vpn – не применяю")
+        return None
+    rules, seen = [], set()
+    for item in items[:RULES_MAX_COUNT + 50]:
+        r = re.sub(r"\s*,\s*", ",", str(item).strip())
+        m = RULE_RE.match(r)
+        if not m:
+            say(f"правила: пропускаю непонятное правило {str(item)[:80]!r}")
+        elif r not in seen and len(rules) < RULES_MAX_COUNT:
+            seen.add(r)
+            rules.append((m.group(1), m.group(2)))
+    if not rules:
+        say("правила: ни одного пригодного – не применяю")
+        return None
+    direct = data.get("direct_dns")
+    direct = [d for d in direct if isinstance(d, str) and DOH_RE.match(d)][:4] if isinstance(direct, list) else []
+    return rules, direct
+
+
+def apply_rules(clash_yaml, loaded):
+    """Раздельная маршрутизация. Перечисленное идёт через VPN (первая группа прокси), остальное – напрямую.
+    DNS при этом не течёт: имена из списка в fake-ip режиме у клиента не разрешаются вовсе (сайт называется серверу),
+    запросы про них (на случай IP-подключений) – по DoH через VPN, а для остальных – системный DNS или direct_dns."""
+    cfg = yaml.safe_load(clash_yaml)
+    if not isinstance(cfg, dict):
+        return clash_yaml
+    groups = [g.get("name") for g in cfg.get("proxy-groups") or [] if isinstance(g, dict) and g.get("name")]
+    proxies = [p.get("name") for p in cfg.get("proxies") or [] if isinstance(p, dict) and p.get("name")]
+    target = groups[0] if groups else proxies[0] if proxies else None
+    if target is None:
+        return clash_yaml
+    rules, direct_dns = loaded
+    out = [f"IP-CIDR,{n},DIRECT,no-resolve" for n in PRIVATE_NETS]
+    # DoH-серверы – через VPN, чтобы запросы про сайты из списка не выходили мимо него.
+    out += [f"IP-CIDR,{h}/32,{target},no-resolve" for h in ("1.1.1.1", "8.8.8.8")]
+    policy = {}
+    for kind, value in rules:
+        # Правилам по адресам не даём разрешать имена (иначе это обычный DNS-запрос мимо VPN).
+        out.append(f"{kind},{value},{target}" + (",no-resolve" if kind in ("IP-CIDR", "IP-CIDR6", "GEOIP") else ""))
+        if kind == "GEOSITE":
+            policy["geosite:" + value] = DOH_DEFAULT
+        elif kind == "DOMAIN-SUFFIX":
+            policy["+." + value] = DOH_DEFAULT
+        elif kind == "DOMAIN":
+            policy[value] = DOH_DEFAULT
+    out.append("MATCH,DIRECT")
+    cfg["mode"] = "rule"
+    cfg["rules"] = out
+    dns = dict(DNS_BLOCK)
+    dns["nameserver"] = direct_dns or ["system"]
+    if policy:
+        dns["nameserver-policy"] = policy
+    cfg["dns"] = dns
+    # Для подключений по IP (без имени) домен берётся из TLS/HTTP/QUIC – иначе правила по доменам их не увидят.
+    cfg["sniffer"] = {"enable": True, "override-destination": False,
+                      "sniff": {"TLS": {"ports": [443, 8443]}, "HTTP": {"ports": [80, "8080-8880"]}, "QUIC": {"ports": [443]}}}
+    return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False).encode()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "nginx"
     sys_version = ""
@@ -281,6 +371,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = add_auto(body)
             if code == 200 and clash and CONF.get("dns", True):
                 body = add_dns(body)
+            if code == 200 and clash:
+                loaded = load_rules()
+                if loaded:
+                    body = apply_rules(body, loaded)
         except (yaml.YAMLError, UnicodeError) as e:
             log(f"не удалось обработать подписку: {e}")
 
@@ -306,6 +400,12 @@ class Server(http.server.ThreadingHTTPServer):
 
 
 def main():
+    if "--check-rules" in sys.argv:
+        # kit net split check: тот же разбор, что и при выдаче подписки, но с отчётом на экран.
+        loaded = load_rules(report=print)
+        if loaded:
+            print(f"Правил через VPN: {len(loaded[0])}; DNS для остального: {', '.join(loaded[1]) or 'системный'}")
+        raise SystemExit(0 if loaded else 1)
     cert, key = CONF.get("cert"), CONF.get("key")
     if cert and CREDS and os.path.exists(os.path.join(CREDS, "cert.pem")):
         cert, key = os.path.join(CREDS, "cert.pem"), os.path.join(CREDS, "key.pem")

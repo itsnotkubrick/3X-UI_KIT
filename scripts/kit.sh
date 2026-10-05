@@ -45,20 +45,32 @@ die()  { printf '%s\n' "${R}✗${N}  $*" >&2; exit 1; }
 # shellcheck disable=SC1090
 . "$XUI_ENV"; . "$KIT_ENV"
 
-API=""
+API=""; API_OK=no
 for scheme in https http; do
   API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
-  curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $XUI_API_TOKEN" "$API/server/getNewUUID" 2>/dev/null && break
+  if curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $XUI_API_TOKEN" "$API/server/getNewUUID" 2>/dev/null; then API_OK=yes; break; fi
 done
+if [[ $API_OK == no ]]; then
+  # Токен не подошёл ни по https, ни по http. Схему выбираем по тому, говорит ли порт панели по TLS:
+  # иначе запрос по http к TLS-порту даёт невнятное «Unsupported HTTP version in response».
+  if [[ $(curl -sk -m 5 -o /dev/null -w '%{http_code}' "https://127.0.0.1:$XUI_PANEL_PORT/" 2>/dev/null || true) =~ ^[1-5] ]]; then scheme=https; else scheme=http; fi
+  API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
+fi
 
 api() { # METHOD path [json]
-  local out
+  local out code
   if [[ $1 == GET ]]; then
-    out=$(curl -sSk -m 20 -H "Authorization: Bearer $XUI_API_TOKEN" "$API/$2")
+    out=$(curl -sSk -m 20 -w $'\n%{http_code}' -H "Authorization: Bearer $XUI_API_TOKEN" "$API/$2" || true)
   else
-    out=$(curl -sSk -m 20 -H "Authorization: Bearer $XUI_API_TOKEN" -H 'Content-Type: application/json' -X "$1" -d "${3:-{\}}" "$API/$2")
+    out=$(curl -sSk -m 20 -w $'\n%{http_code}' -H "Authorization: Bearer $XUI_API_TOKEN" -H 'Content-Type: application/json' -X "$1" -d "${3:-{\}}" "$API/$2" || true)
   fi
-  [[ $(jq -r '.success' <<<"$out" 2>/dev/null) == true ]] || die "Панель ответила ошибкой: $(jq -r '.msg // .' <<<"$out" 2>/dev/null | head -c 300)"
+  code=${out##*$'\n'}; out=${out%$'\n'*}
+  if [[ $(jq -r '.success' <<<"$out" 2>/dev/null) != true ]]; then
+    if [[ -z $out || $out != "{"* ]]; then
+      die "Панель не приняла запрос (HTTP ${code:-нет ответа}). Частая причина: токен API в $XUI_ENV устарел или не подходит к этой панели. Проверьте: kit check"
+    fi
+    die "Панель ответила ошибкой: $(jq -r '.msg // .' <<<"$out" 2>/dev/null | head -c 300)"
+  fi
   jq -c '.obj' <<<"$out"
 }
 
@@ -1088,7 +1100,7 @@ cmd_fix() {
 # Что входит в копию: база панели (пользователи,
 # ключи, подключения), настройки kit и kit-sub, nginx, сайт-заглушка, свои сертификаты.
 # Сертификаты Let's Encrypt (на IP и на свой домен) не берём: на новом сервере он выпускается заново.
-BACKUP_PATHS=(/etc/x-ui/install-result.env /etc/kit/kit.env /etc/kit-sub/config.json
+BACKUP_PATHS=(/etc/x-ui/install-result.env /etc/kit/kit.env /etc/kit-sub/config.json /etc/kit-sub/rules.yaml
   /etc/nginx/kit-stream.conf /etc/nginx/conf.d/kit.conf /var/www/kit /root/cert/self /root/cert/custom /root/3x-ui.txt)
 
 # Вернуть проверенное ядро Xray (панель 3.9 иногда отвечает ошибкой GitHub API, хотя ядро заменено, поэтому смотрим на версию).
@@ -1230,7 +1242,8 @@ dst = sqlite3.connect(sys.argv[2])
 src.backup(dst)
 dst.close(); src.close()
 PY
-  for p in "${BACKUP_PATHS[@]}"; do if [[ -e $p ]]; then cp -a --parents "$p" "$tmp"; fi; done
+  # cp --parents с абсолютным путём падает («No such file»), если команду запустили не из «/» (например, из /root): копируем из корня.
+  for p in "${BACKUP_PATHS[@]}"; do if [[ -e $p ]]; then (cd / && cp -a --parents "${p#/}" "$tmp"); fi; done
   # Какой сертификат был у панели и подписки – новый сервер должен получить такой же.
   c=$(jq -r '.cert // empty' /etc/kit-sub/config.json 2>/dev/null || true)
   [[ -z $c && -f /etc/nginx/conf.d/kit.conf ]] && c=$(awk '$1 == "ssl_certificate" {sub(/;$/, "", $2); print $2; exit}' /etc/nginx/conf.d/kit.conf)
@@ -1713,6 +1726,71 @@ net_dns() { # [on|off]
   esac
 }
 
+# ---------- раздельная маршрутизация в подписке ----------
+# Необязательно: /etc/kit-sub/rules.yaml. Через VPN идёт только перечисленное, остальное (в том числе местные приложения)
+# напрямую. Работает для приложений на Mihomo (Clash Verge, FlClash, Mihomo Party): правила приезжают с подпиской, на телефонах
+# ничего настраивать не нужно. DNS при этом не течёт: имена из списка у клиента не разрешаются, а запросы про них идут по DoH
+# через VPN (подробности – в kit-sub.py). Нет файла – подписка как обычно, весь трафик через VPN.
+SPLIT_FILE=/etc/kit-sub/rules.yaml
+
+split_template() {
+  cat <<'YAML'
+# Раздельная маршрутизация подписки (приложения на Mihomo: Clash Verge, FlClash, Mihomo Party).
+# Через VPN идёт ТОЛЬКО перечисленное ниже, всё остальное – напрямую.
+# Правка вступает в силу, когда приложение обновит подписку; перезапуск не нужен.
+# Проверить файл: kit net split check. Выключить: kit net split off.
+#
+# Правила (по одному в строке): ТИП,ЗНАЧЕНИЕ
+#   GEOSITE,youtube              – готовая категория сервиса (список: github.com/MetaCubeX/meta-rules-dat, geo/geosite)
+#   DOMAIN-SUFFIX,example.org    – домен и все его поддомены
+#   DOMAIN,api.example.org       – ровно этот домен
+#   DOMAIN-KEYWORD,example       – домен, в котором есть слово
+#   IP-CIDR,203.0.113.0/24       – подсеть
+# GEOSITE: приложение один раз скачивает базу категорий с GitHub.
+
+via_vpn:
+  - GEOSITE,youtube
+  - GEOSITE,openai
+  # - DOMAIN-SUFFIX,example.org
+
+# Необязательно: DNS для всего остального (по умолчанию – системный DNS приложения). Только адреса https://…
+# direct_dns:
+#   - https://dns.example.net/dns-query
+YAML
+}
+
+net_split() { # [on|off|check]
+  local act=${1:-} n
+  case $act in
+    "")
+      if [[ -f $SPLIT_FILE ]]; then
+        n=$(python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules 2>&1 | tail -1 || true)
+        echo "Раздельная маршрутизация включена: $n"
+        echo "Файл: $SPLIT_FILE (править, проверить: kit net split check, выключить: kit net split off)"
+        echo "Работает в приложениях на Mihomo; Xray и sing-box приложения получают подписку как раньше."
+      else
+        echo "Раздельная маршрутизация выключена: через VPN идёт весь трафик. Включить: kit net split on"
+      fi ;;
+    on)
+      [[ -f /usr/local/lib/kit-sub/kit_sub.py ]] || die "Нужна подписка kit-sub (обновите kit: kit update)."
+      if [[ -f $SPLIT_FILE ]]; then say "Уже включено: $SPLIT_FILE"; return 0; fi
+      if [[ -f $SPLIT_FILE.off ]]; then install -m 644 "$SPLIT_FILE.off" "$SPLIT_FILE"; else split_template >"$SPLIT_FILE"; fi
+      chmod 755 /etc/kit-sub; chmod 644 "$SPLIT_FILE"
+      say "Включил: $SPLIT_FILE"
+      echo "Сейчас через VPN идут только перечисленные сервисы (YouTube, ChatGPT), остальное напрямую."
+      echo "Список правится так: nano $SPLIT_FILE, затем kit net split check."
+      echo "Приложения на Mihomo подхватят при обновлении подписки." ;;
+    off)
+      [[ -f $SPLIT_FILE ]] || { say "Уже выключено."; return 0; }
+      mv "$SPLIT_FILE" "$SPLIT_FILE.off"
+      say "Выключил: подписка снова отдаёт весь трафик через VPN (список сохранён: $SPLIT_FILE.off)." ;;
+    check)
+      [[ -f $SPLIT_FILE ]] || die "Файла нет: $SPLIT_FILE (включить: kit net split on)"
+      python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules || die "Список не применится – подписка останется без раздельной маршрутизации." ;;
+    *) die "kit net split [on|off|check]" ;;
+  esac
+}
+
 # ---------- панель и подписка: по IP или по домену ----------
 # Со своим доменом (режим «всё на 443») заход по имени домена попадает к сайту-прикрытию. Панель и подписка по
 # умолчанию открываются по IP; `kit net panel domain` добавляет их и в блок домена (сертификат Let's Encrypt домена),
@@ -2064,8 +2142,9 @@ cmd_net() {
     masq) hy_masq "$@" ;;
     dns) net_dns "$@" ;;
     panel) net_panel "$@" ;;
+    split) net_split "$@" ;;
     vision) case ${1:-} in on) cmd_vision --all ;; off) cmd_vision --all off ;; *) die "kit net vision on|off" ;; esac ;;
-    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | panel domain|ip | vision on|off]" ;;
+    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | panel domain|ip | split on|off|check | vision on|off]" ;;
   esac
 }
 
