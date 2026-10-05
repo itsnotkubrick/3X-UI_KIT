@@ -837,22 +837,22 @@ check_system() {
   if ((${used:-0} >= 95)); then c_warn "диск заполнен на ${used}%"; else c_ok "место на диске: занято ${used:-?}%"; fi
 }
 
-# Заметность: известный сайт на чужом IP и запасные порты, которые на чужой заход отвечают пустой страницей.
+# Маскировка: известный сайт на чужом IP и запасные порты, которые на посторонний запрос отвечают пустой страницей.
 check_stealth() {
   local id kind remark sni names list
   while IFS=$'\t' read -r id kind remark sni; do
     [[ $kind == reality && -n $sni && $sni =~ $SNI_BRAND_RE ]] || continue
-    same_net "$sni" || c_warn "$remark: $sni – известный сайт на чужом IP, это заметно. Надёжнее сосед по подсети: kit net site"
+    same_net "$sni" || c_warn "$remark: $sni – известный сайт на чужом IP не годится для маскировки. Лучше сосед по подсети: kit net site"
   done < <(sni_targets 2>/dev/null || true)
   list=$(api GET inbounds/list 2>/dev/null) || return 0
   if jq -e 'any(.[]; .protocol == "hysteria" and .enable == true)' <<<"$list" >/dev/null && [[ -z $(hy_masq_state) ]]; then
-    c_warn "Hysteria2 на чужой HTTP/3-запрос отвечает не как сайт. Включить: kit net masq on"
+    c_warn "Hysteria2 на посторонний HTTP/3-запрос отвечает не как сайт. Включить: kit net masq on"
   fi
   if [[ -z $(jq -r '.subJsonDns // ""' <<<"$(api POST setting/all '{}' 2>/dev/null)" 2>/dev/null) ]]; then
     c_warn "DNS в подписке Xray JSON обычный (UDP 8.8.8.8). Включить DoH через прокси: kit net dns on"
   fi
   names=$(jq -r '[.[] | select(.enable == true and .listen != "127.0.0.1" and (.remark == "VLESS-WS" or .remark == "Trojan-gRPC" or .remark == "VMess-WS")) | .remark] | join(", ")' <<<"$list")
-  [[ -z $names ]] || c_warn "$names открыты на своих портах и на чужой заход отвечают пустой страницей. Не нужны? kit net off имя (режим «всё на 443» их прячет за сайтом)"
+  [[ -z $names ]] || c_warn "$names открыты на своих портах и на посторонний запрос отвечают пустой страницей. Не нужны? kit net off имя (режим «всё на 443» прячет их за сайтом)"
 }
 
 run_checks() {
@@ -1229,12 +1229,12 @@ SNI_POOL=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com www.microso
 
 SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
 
-# Бесплатные и динамические имена (sslip.io, work.gd и т. п.) любят чужие прокси-серверы: под них маскироваться не стоит.
+# Бесплатные и динамические имена (sslip.io, work.gd и т. п.) часто используют чужие прокси-серверы: под них маскироваться не стоит.
 SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|myftp\.biz|dynu\.net|freeddns\.org|no-ip\.(org|biz|info)|nom\.za|tk|ml|ga|cf|gq)$'
-# Известные сайты на чужом IP заметны: сайт-прикрытие должен быть «своим» для подсети сервера.
+# Известные сайты на чужом IP не подходят: сайт-прикрытие должен быть «своим» для подсети сервера.
 SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
 
-# Имена с «сомнительными» словами не берём: маскироваться под такой сайт неприятно и небезопасно для вас.
+# Имена с «сомнительными» словами не берём: брать такой сайт для маскировки неприятно и небезопасно для вас.
 SNI_BAD_RE='(probiv|porn|xxx|sex|adult|casino|bet|vpn|proxy|torrent|crack|hack|warez|drug|weapon|leak|escort|gambl|poker)'
 
 # У сайта настоящий сертификат: цепочка проходит проверку, имя совпадает.
@@ -1358,7 +1358,7 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
     say "Ищу сайты в подсети сервера (около 250 коротких подключений к порту 443 соседних адресов)"
     while read -r a; do [[ -n $a ]] && pool+=("$a"); done < <(nearby_sites)
     if ((${#pool[@]} == 0)); then
-      warn "В подсети подходящего сайта не нашёл. Известный сайт на чужом IP заметнее остальных."
+      warn "В подсети подходящего сайта не нашёл. Известный сайт на чужом IP подходит хуже остальных."
       echo "  Лучший выход – свой домен (установка с --domain) или свой сайт: kit net site сайт.com"
       if [[ -t 0 ]]; then
         ask_tty "  Взять запасной сайт из списка? [y/N] "
@@ -1386,7 +1386,7 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
   done
   for i in "${!ids[@]}"; do
     if [[ ${news[$i]} =~ $SNI_BRAND_RE ]] && ! same_net "${news[$i]}"; then
-      warn "Для ${remarks[$i]} в подсети не хватило сайтов – взят известный сайт из общего списка, он заметнее соседа. Лучше свой сайт: kit net site сайт.com"
+      warn "Для ${remarks[$i]} в подсети не хватило сайтов – взят известный сайт из общего списка, он подходит хуже соседа. Лучше свой сайт: kit net site сайт.com"
       break
     fi
   done
@@ -1645,7 +1645,7 @@ hy_masq() { # on|off
     [[ -n $page ]] || page='<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Cumulo Cloud</title></head><body style="font-family:sans-serif;text-align:center;margin-top:20vh"><h1>Cumulo Cloud</h1><p>Service status: all systems operational.</p></body></html>'
     inbound_patch "$id" '.streamSettings |= ((if type == "string" then fromjson else . end) | .hysteriaSettings.masquerade = {type: "string", content: $c, statusCode: 200, headers: {"content-type": "text/html; charset=utf-8"}})' --arg c "$page" \
       || die "Панель не приняла изменение. Ничего не изменилось."
-    say "Hysteria2 теперь отвечает на чужой HTTP/3-запрос страницей сайта."
+    say "Hysteria2 теперь отвечает на посторонний HTTP/3-запрос страницей сайта."
   else
     inbound_patch "$id" '.streamSettings |= ((if type == "string" then fromjson else . end) | del(.hysteriaSettings.masquerade))' || die "Панель не приняла изменение."
     say "Маскировка Hysteria2 выключена."
@@ -1732,7 +1732,7 @@ net_show() {
   echo
   echo "Отпечаток клиента: ${fpl:-?} (сменить: kit net fp firefox)"
   if jq -e 'any(.[]; .protocol == "hysteria")' <<<"$list" >/dev/null; then
-    if [[ -n $(hy_masq_state) ]]; then echo "Hysteria2 отвечает на чужой запрос страницей сайта (выключить: kit net masq off)"
+    if [[ -n $(hy_masq_state) ]]; then echo "Hysteria2 отвечает на посторонний запрос страницей сайта (выключить: kit net masq off)"
     else echo "Hysteria2 без маскировки под сайт (включить: kit net masq on)"; fi
   fi
 }

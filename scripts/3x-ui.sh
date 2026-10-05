@@ -116,12 +116,12 @@ sni_alive() { sni_ok "$1"; }
 
 SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
 
-# Бесплатные и динамические имена (sslip.io, work.gd и т. п.) любят чужие прокси-серверы: под них маскироваться не стоит.
+# Бесплатные и динамические имена (sslip.io, work.gd и т. п.) часто используют чужие прокси-серверы: под них маскироваться не стоит.
 SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|myftp\.biz|dynu\.net|freeddns\.org|no-ip\.(org|biz|info)|nom\.za|tk|ml|ga|cf|gq)$'
-# Известные сайты на чужом IP заметны: сайт-прикрытие должен быть «своим» для подсети сервера.
+# Известные сайты на чужом IP не подходят: сайт-прикрытие должен быть «своим» для подсети сервера.
 SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
 
-# Имена с «сомнительными» словами не берём: маскироваться под такой сайт неприятно и небезопасно для вас.
+# Имена с «сомнительными» словами не берём: брать такой сайт для маскировки неприятно и небезопасно для вас.
 SNI_BAD_RE='(probiv|porn|xxx|sex|adult|casino|bet|vpn|proxy|torrent|crack|hack|warez|drug|weapon|leak|escort|gambl|poker)'
 
 # У сайта настоящий сертификат: цепочка проходит проверку, имя совпадает.
@@ -1002,7 +1002,7 @@ proto_reality() {
 }
 
 # Второй REALITY на высоком свободном порту, напрямую (без nginx). Где-то 443 и привычные порты
-# проходят хуже, чем высокий случайный; ключи, shortId и порт у него свои, сайт маскировки тот же.
+# бывает удобнее высокий случайный порт; ключи, shortId и порт у него свои, сайт маскировки тот же.
 proto_reality2() {
   local keys stream settings port
   keys=$(api GET server/getNewX25519Cert)
@@ -1080,7 +1080,7 @@ proto_ss() {
 proto_hy2() {
   local settings stream
   settings=$(jq -nc --arg a "$(rand_str 16)" --argjson c "$(client_base hy2)" '{version: 2, clients: [$c + {auth: $a}]}')
-  # На чужой HTTP/3-запрос сервер отвечает страницей сайта (masquerade), а не молчанием или ошибкой.
+  # На посторонний HTTP/3-запрос сервер отвечает страницей сайта (masquerade), а не молчанием или ошибкой.
   stream=$(jq -nc --argjson t "$(tls_json '["h3"]')" --arg page "${STUB_HTML:-}" '{network: "hysteria", security: "tls", tlsSettings: $t,
     hysteriaSettings: ({version: 2} + (if $page != "" then {masquerade: {type: "string", content: $page, statusCode: 200, headers: {"content-type": "text/html; charset=utf-8"}}} else {} end))}')
   add_inbound "Hysteria2" "$PORT" udp hysteria "$settings" "$stream"
@@ -1815,7 +1815,7 @@ PY
     warn "IP сервера сменился: $old_ip → $HOST."
     echo "Старые подписки указывают на старый IP, поэтому клиентам нужно один раз добавить"
     echo "подписку заново: ${B}kit user list${N}, затем ${B}kit user link имя${N}."
-    echo "${D}Чтобы в следующий раз переезд прошёл незаметно для клиентов, ставьте сервер на домен (--cert, --key, --host).${N}"
+    echo "${D}Чтобы в следующий раз переезд прошёл без хлопот для клиентов, ставьте сервер на домен (--cert, --key, --host).${N}"
   else
     echo "Клиентам ничего менять не нужно: ключи, ссылки и подписки те же."
   fi
