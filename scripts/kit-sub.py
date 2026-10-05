@@ -157,7 +157,7 @@ def add_auto(clash_yaml):
                       "interval": 300, "tolerance": 100, "lazy": True, "proxies": auto_names})
     for g in groups[1:]:
         lst = g.get("proxies") if isinstance(g, dict) else None
-        if g.get("type") == "select" and isinstance(lst, list) and any(x in names for x in lst):
+        if isinstance(g, dict) and g.get("type") == "select" and isinstance(lst, list) and any(x in names for x in lst):
             g["proxies"] = [AUTO_GROUP] + lst
             break
     return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False).encode()
@@ -221,12 +221,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def send_error(self, code, message=None, explain=None):
-        # Свои короткие ответы вместо страницы ошибок Python: сканеру не видно, чем отвечает сервер.
+        # Свои ответы вместо страницы ошибок Python, в том же виде, что у обычного nginx.
         self.close_connection = True
-        self.send_plain(code, f"{code} {self.responses.get(code, ('error',))[0].lower()}")
+        self.send_html_error(code)
+
+    def send_html_error(self, code):
+        phrase = self.responses.get(code, ("Error",))[0]
+        body = (f"<html>\r\n<head><title>{code} {phrase}</title></head>\r\n<body>\r\n<center><h1>{code} {phrase}</h1></center>\r\n"
+                "<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n").encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def do_other(self):
-        self.send_plain(404, "404 page not found")
+        self.send_html_error(404)
 
     do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_other
 
@@ -236,16 +247,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if not path.startswith(PATH):
-            return self.send_plain(404, "404 page not found")
+            return self.send_html_error(404)
         sub_id = path[len(PATH):]
         if not SUB_ID.match(sub_id):
-            return self.send_plain(404, "404 page not found")
+            return self.send_html_error(404)
         ua = self.headers.get("User-Agent", "")
         host = CONF.get("link_host") or self.headers.get("Host", CONF.get("host", ""))
         accept = self.headers.get("Accept", "")
         code, headers, body = upstream(sub_id, ua, host, accept)
         if code is None:
-            return self.send_plain(502, "subscription backend is unavailable")
+            return self.send_html_error(502)
 
         clash = bool(CLASH_UA.search(ua)) and "yaml" in headers.get("content-type", "")
         awg = clash and not NO_AWG_UA.search(ua)

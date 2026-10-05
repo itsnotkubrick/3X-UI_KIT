@@ -58,7 +58,7 @@ ALL_PROTOS=(reality reality2 hy2 xhttp ws trojan vmess ss tuic wg awg awg3 mtpro
 # (проверено 2026-09-27: рукопожатие доходит до сервера, ответ – нет). По умолчанию не ставим.
 DEFAULT_PROTOS=(reality hy2 xhttp ws trojan vmess ss tuic awg awg3 mtproto)
 declare -A PORTS=([xhttp]=8443 [ws]=2053 [trojan]=2083 [vmess]=2087 [ss]=8388 [tuic]=8444 [wg]=51820 [awg]=51821 [awg3]=51822 [mtproto]=8445)
-PROTOS=(); CREATED=(); OPEN=()
+PROTOS=(); CREATED=(); OPEN=(); NB_ALL=()
 # Режим «всё TCP на 443»: nginx разводит по SNI и путям, подключения слушают только localhost.
 SINGLE=no
 declare -A INNER=([reality]=10443 [xhttp]=10444 [mtproto]=10445 [web]=10446 [selfweb]=10447 [ws]=10451 [vmess]=10452 [trojan]=10453 [sub]=10460)
@@ -119,7 +119,7 @@ SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za
 
 # Бесплатные и динамические имена (sslip.io, work.gd и т. п.) часто используют чужие прокси-серверы: под них маскироваться не стоит.
 SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|myftp\.biz|dynu\.net|freeddns\.org|no-ip\.(org|biz|info)|nom\.za|tk|ml|ga|cf|gq)$'
-# Известные сайты на чужом IP не подходят: сайт-прикрытие должен быть «своим» для подсети сервера.
+# Известные сайты на чужом IP не подходят: сайт для маскировки должен быть «своим» для подсети сервера.
 SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
 
 # Имена с «сомнительными» словами не берём: брать такой сайт для маскировки неприятно и небезопасно для вас.
@@ -164,7 +164,7 @@ same_net() { # имя
 # Имена из сертификатов соседних адресов /24: заходим на 443 без имени и читаем subjectAltName.
 nearby_scan() { # основа "a.b.c"
   local me; me=$(host_ip)
-  seq 1 254 | xargs -P 24 -I{} bash -c '
+  seq 1 254 | xargs -P 8 -I{} bash -c '
       ip=$1; [ "$ip" = "$2" ] && exit 0
       echo | timeout 4 openssl s_client -connect "$ip:443" -tls1_3 -alpn h2 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null \
         | tr "," "\n" | sed -n "s/^ *DNS://p"' _ "$1.{}" "$me" 2>/dev/null | sort -u | grep -E "$SNI_RE" | head -40 || true
@@ -541,9 +541,10 @@ main() {
     SNI=$DOMAIN
   elif [[ -z $SNI ]]; then
     echo
-    echo "Ищу сайт-прикрытие в подсети сервера… (около минуты)"
+    echo "Подбираю сайт для маскировки среди соседей по подсети… (около 250 коротких обращений к порту 443 соседних адресов, около минуты; не нужно – запустите с --sni или --domain)"
     local -a nb=()
     mapfile -t nb < <(nearby_sites | shuf)
+    NB_ALL=("${nb[@]}")
     if ((${#nb[@]})); then
       SNI=${nb[0]}; SNI2=${nb[1]:-}; SNI3=${nb[2]:-}
       ok "найден: ${B}$SNI${N} · та же подсеть · TLS 1.3, h2, сертификат верный"
@@ -554,7 +555,7 @@ main() {
         ask_tty "   Продолжить с запасным сайтом из списка? [y/N] " || true
         [[ $REPLY =~ ^[yYдД]$ ]] || die "Остановился по вашей просьбе. Ставить можно снова в любой момент."
       else
-        later "Сайт-прикрытие взят из общего списка (в подсети сервера подходящего не нашлось). Надёжнее свой домен или kit net site."
+        later "Сайт для маскировки взят из общего списка (в подсети сервера подходящего не нашлось). Надёжнее свой домен или kit net site."
       fi
       local -a pool=()
       mapfile -t pool < <(printf '%s\n' "${SNI_CANDIDATES[@]}" | shuf)
@@ -573,15 +574,21 @@ main() {
   if [[ $TRUSTED == yes && $multi == no && ( -z $SNI2 || -z $SNI3 ) ]]; then
     local -a nb2=()
     echo
-    echo "Подбираю сайты для XHTTP и MTProto… (около минуты)"
-    mapfile -t nb2 < <(nearby_sites | shuf)
+    if ((${#NB_ALL[@]})); then
+      nb2=("${NB_ALL[@]}")
+    else
+      echo "Подбираю сайты для XHTTP и MTProto… (около 250 коротких обращений к порту 443 соседних адресов вашей подсети)"
+      mapfile -t nb2 < <(nearby_sites | shuf)
+    fi
     for s in "${nb2[@]}"; do
       [[ $s == "$SNI" || $s == "$SNI2" || $s == "$SNI3" ]] && continue
       if [[ -z $SNI2 ]]; then SNI2=$s; elif [[ -z $SNI3 ]]; then SNI3=$s; fi
     done
   fi
   # Для режима «всё на 443» XHTTP и MTProto нужны свои сайты: nginx различает их по SNI.
-  for s in "${SNI_CANDIDATES[@]}"; do
+  local -a pool2=()
+  mapfile -t pool2 < <(printf '%s\n' "${SNI_CANDIDATES[@]}" | shuf)
+  for s in "${pool2[@]}"; do
     [[ $s == "$SNI" || $s == "$SNI2" || $s == "$SNI3" ]] && continue
     if [[ -z $SNI2 ]] && sni_ok "$s"; then SNI2=$s; continue; fi
     [[ -z $SNI3 && -n $SNI2 ]] && { SNI3=$s; break; }
@@ -1487,8 +1494,10 @@ server {
 NGX
   fi
   grep -q 'kit-stream.conf' /etc/nginx/nginx.conf || echo 'include /etc/nginx/kit-stream.conf;' >>/etc/nginx/nginx.conf
-  if ! nginx -t >/tmp/nginx-test.log 2>&1; then
-    cat /tmp/nginx-test.log >&2
+  local ngx_log
+  ngx_log=$(mktemp)
+  if ! nginx -t >"$ngx_log" 2>&1; then
+    cat "$ngx_log" >&2; rm -f "$ngx_log"
     # Наш include убираем, чтобы не оставить чужой nginx сломанным.
     sed -i '/kit-stream\.conf/d' /etc/nginx/nginx.conf
     rm -f /etc/nginx/kit-stream.conf
@@ -1640,7 +1649,7 @@ sub_links() {
 # ИМЯ=значение без подстановок и команд.
 safe_env() {
   [[ -r $1 ]] || die "В копии нет файла ${1##*/}."
-  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=-]*|'[^']*'))?$" "$1" && die "В копии подозрительный файл ${1##*/} – не восстанавливаю."
+  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=_-]*|'[^']*'))?$" "$1" && die "В копии подозрительный файл ${1##*/} – не восстанавливаю."
   return 0
 }
 
@@ -1756,6 +1765,8 @@ PY
   if [[ -f $tmp/etc/kit/kit.env ]]; then
     SINGLE=$(. "$tmp/etc/kit/kit.env"; echo "${SINGLE:-no}")
     SUB_PATH=$(. "$tmp/etc/kit/kit.env"; echo "${SUB_PATH:-}")
+    LINK_HOST=$(. "$tmp/etc/kit/kit.env"; echo "${LINK_HOST:-}")
+    [[ $LINK_HOST =~ ^[A-Za-z0-9.:-]*$ ]] || LINK_HOST=""
     SUB_INTERNAL=$(. "$tmp/etc/kit/kit.env"; echo "${SUB_INTERNAL:-}")
     [[ $SINGLE =~ ^(yes|no)$ && $SUB_PATH =~ ^/[A-Za-z0-9_-]+/$ && $SUB_INTERNAL =~ ^[0-9]{1,5}$ ]] \
       || die "В копии странные настройки kit (kit.env) – не восстанавливаю."
@@ -1804,7 +1815,7 @@ PY
   fi
   # Всё на 443: nginx строит маршруты по подключениям из базы, заглушка – из копии.
   if [[ $SINGLE == yes ]]; then
-    [[ -n $DOMAIN ]] && { issue_domain_cert || domain_cert_fallback; }
+    [[ -n $DOMAIN ]] && { issue_domain_cert || die "Не удалось получить сертификат для $DOMAIN: порт 80 должен быть свободен, а A-запись домена указывать на этот сервер. Лог: /var/log/kit-domain-cert.log"; }
     install -d -m 755 /var/www/kit
     [[ -f $tmp/var/www/kit/index.html ]] && install -m 644 "$tmp/var/www/kit/index.html" /var/www/kit/index.html
     setup_nginx
@@ -1815,7 +1826,7 @@ PY
     # Панель по домену: nginx собран заново, значит блок домена нужно вернуть (домен должен указывать на этот сервер).
     if grep -q '^PANEL_ON=domain' /etc/kit/kit.env; then
       sed -i 's/^PANEL_ON=.*/PANEL_ON=ip/' /etc/kit/kit.env
-      /usr/local/bin/kit net panel domain >/dev/null 2>&1 || warn "Панель по домену не включилась (домен должен указывать на этот сервер): kit net panel domain"
+      /usr/local/bin/kit net panel domain >/dev/null 2>&1 || { /usr/local/bin/kit __xver 0 >/dev/null 2>&1 || true; warn "Панель по домену не включилась (домен должен указывать на этот сервер): kit net panel domain"; }
     fi
     brand_xui_menu
     /usr/local/bin/kit update --auto >/dev/null 2>&1 || later "Автообновление не включилось – включите позже: kit update --auto"

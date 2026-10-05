@@ -382,7 +382,7 @@ cmd_vision() { # имя|--all [off]
 cmd_toggle() { # имя true|false
   valid_name "$1"
   [[ -n $(client "$1") ]] || die "Нет пользователя $1"
-  update_user "$1" ".enable = \$v" --argjson v "$2"
+  update_user "$1" ".enable = \$v | .comment = \"kit\"" --argjson v "$2"
   if [[ $2 == true ]]; then say "Пользователь $1 включён."; else say "Пользователь $1 выключен – подписка и подключения не работают."; fi
 }
 
@@ -1231,7 +1231,7 @@ SNI_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za
 
 # Бесплатные и динамические имена (sslip.io, work.gd и т. п.) часто используют чужие прокси-серверы: под них маскироваться не стоит.
 SNI_DYN_RE='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|myftp\.biz|dynu\.net|freeddns\.org|no-ip\.(org|biz|info)|nom\.za|tk|ml|ga|cf|gq)$'
-# Известные сайты на чужом IP не подходят: сайт-прикрытие должен быть «своим» для подсети сервера.
+# Известные сайты на чужом IP не подходят: сайт для маскировки должен быть «своим» для подсети сервера.
 SNI_BRAND_RE='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
 
 # Имена с «сомнительными» словами не берём: брать такой сайт для маскировки неприятно и небезопасно для вас.
@@ -1276,7 +1276,7 @@ same_net() { # имя
 # Имена из сертификатов соседних адресов /24: заходим на 443 без имени и читаем subjectAltName.
 nearby_scan() { # основа "a.b.c"
   local me; me=$(host_ip)
-  seq 1 254 | xargs -P 24 -I{} bash -c '
+  seq 1 254 | xargs -P 8 -I{} bash -c '
       ip=$1; [ "$ip" = "$2" ] && exit 0
       echo | timeout 4 openssl s_client -connect "$ip:443" -tls1_3 -alpn h2 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null \
         | tr "," "\n" | sed -n "s/^ *DNS://p"' _ "$1.{}" "$me" 2>/dev/null | sort -u | grep -E "$SNI_RE" | head -40 || true
@@ -1398,7 +1398,16 @@ sni_rotate() { # [--nearby] [--dry-run] [сайт]
 
   local bak
   bak=/root/x-ui-before-sni-$(date +%Y%m%d-%H%M%S).db
-  install -m 600 /dev/null "$bak"; cat /etc/x-ui/x-ui.db >"$bak"
+  install -m 600 /dev/null "$bak"
+  python3 - /etc/x-ui/x-ui.db "$bak" <<'PY' || die "Не удалось сохранить копию базы панели. Ничего не менял."
+import sqlite3, sys
+src = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst)
+dst.close(); src.close()
+PY
+  # Храним три последние копии: в них ключи сервера.
+  ls -1t /root/x-ui-before-sni-*.db 2>/dev/null | tail -n +4 | while read -r old; do rm -f -- "$old"; done
   say "Копия базы панели: $bak"
 
   local -a done_i=()
@@ -1545,7 +1554,7 @@ reality_add() { # [порт]
   settings=$(jq -nc '{clients: [], decryption: "none", fallbacks: []}')
   # Сайт маскировки (или свой домен) – как у основного REALITY, ключи и shortId – свои.
   stream=$(jq -c --argjson k "$keys" --arg sid "$sid" '(.streamSettings | if type == "string" then fromjson else . end)
-    | .externalProxy = [] | .tcpSettings.acceptProxyProtocol = false | .realitySettings.xver = 0
+    | .externalProxy = [] | .tcpSettings.acceptProxyProtocol = false
     | .realitySettings.privateKey = $k.privateKey | .realitySettings.shortIds = [$sid]
     | .realitySettings.settings.publicKey = $k.publicKey | del(.sockopt)' <<<"$base")
   body=$(jq -nc --argjson port "$port" --arg s "$settings" --arg st "$stream" '{remark: "REALITY-2", enable: true, listen: "", port: $port, protocol: "vless",
@@ -1799,7 +1808,7 @@ net_panel() { # [domain|ip]
   cur=${PANEL_ON:-ip}
   if [[ -z $want ]]; then
     if [[ $cur == domain ]]; then echo "Панель и подписка открываются по домену $domain (вернуть на IP: kit net panel ip)"
-    else echo "Панель и подписка открываются по IP ${HOST:-?}; домен $domain – сайт-прикрытие (открывать и по домену: kit net panel domain)"; fi
+    else echo "Панель и подписка открываются по IP ${HOST:-?}; домен $domain – сайт для маскировки (открывать и по домену: kit net panel domain)"; fi
     return 0
   fi
   [[ $want == domain || $want == ip ]] || die "kit net panel [domain|ip]"
@@ -1811,18 +1820,25 @@ net_panel() { # [domain|ip]
   fi
   tmp=$(mktemp); bak=$(mktemp); cp -p "$PANEL_CONF" "$bak"
   panel_conf_py render "$PANEL_CONF" "$want" "$SUB_PATH" "$panel_path" >"$tmp" || { rm -f "$tmp" "$bak"; die "Не удалось собрать настройки nginx. Ничего не изменилось."; }
-  rid=$(sni_targets | awk -F'\t' '$2 == "self" && $3 == "REALITY" {print $1; exit}')
-  [[ -n $rid ]] || { rm -f "$tmp" "$bak"; die "Не нашёл REALITY со своим доменом."; }
+  local -a rids=()
+  mapfile -t rids < <(sni_targets | awk -F'\t' '$2 == "self" {print $1}')
+  ((${#rids[@]})) || { rm -f "$tmp" "$bak"; die "Не нашёл REALITY со своим доменом."; }
+  panel_xver() { # 0|1 – у всех REALITY, чей сайт – блок домена (в том числе REALITY-2)
+    local r
+    for r in "${rids[@]}"; do
+      inbound_patch "$r" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x "$1" || return 1
+    done
+  }
   # Передача настоящего IP клиента сайту домена (PROXY protocol) нужна, чтобы панель видела, кто заходит.
   local xv=0; [[ $want == domain ]] && xv=1
-  panel_revert() { cat "$bak" >"$PANEL_CONF"; inbound_patch "$rid" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x "$((1 - xv))" || true; nginx -t >/dev/null 2>&1 && systemctl reload nginx || true; }
+  panel_revert() { cat "$bak" >"$PANEL_CONF"; panel_xver "$((1 - xv))" || true; nginx -t >/dev/null 2>&1 && systemctl reload nginx || true; }
   if [[ $want == domain ]]; then
     cat "$tmp" >"$PANEL_CONF"
     nginx -t >/dev/null 2>&1 || { cat "$bak" >"$PANEL_CONF"; rm -f "$tmp" "$bak"; die "nginx не принял настройки. Ничего не изменилось."; }
-    inbound_patch "$rid" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x 1 || { cat "$bak" >"$PANEL_CONF"; rm -f "$tmp" "$bak"; die "Панель не приняла изменение. Ничего не изменилось."; }
+    panel_xver 1 || { cat "$bak" >"$PANEL_CONF"; rm -f "$tmp" "$bak"; die "Панель не приняла изменение. Ничего не изменилось."; }
     systemctl reload nginx || { panel_revert; rm -f "$tmp" "$bak"; die "nginx не перезагрузился. Всё возвращено."; }
   else
-    inbound_patch "$rid" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x 0 || { rm -f "$tmp" "$bak"; die "Панель не приняла изменение. Ничего не изменилось."; }
+    panel_xver 0 || { rm -f "$tmp" "$bak"; die "Панель не приняла изменение. Ничего не изменилось."; }
     cat "$tmp" >"$PANEL_CONF"
     if ! nginx -t >/dev/null 2>&1 || ! systemctl reload nginx; then panel_revert; rm -f "$tmp" "$bak"; die "nginx не принял настройки. Всё возвращено."; fi
   fi
@@ -1960,7 +1976,7 @@ net_fp() { # отпечаток
   done < <(api GET inbounds/list | jq -r '.[] | select((.streamSettings | if type == "string" then fromjson else . end) | (.security == "reality" or .security == "tls")) | .id')
   say "Отпечаток $old → ${B}$f${N}, обновлено подключений: $n."
   echo "Подписка обновится сама; вручную сохранённые ссылки замените (kit user link имя)."
-  echo "Меняйте, если связь пропала сразу у многих, а не из-за одного неудачного раза."
+  echo "Вернуть прежний: kit net fp chrome."
 }
 
 cmd_net() {
@@ -2228,6 +2244,11 @@ case "$cmd_key" in
   "reality add") shift 2; reality_add "$@" ;;
   "panel update") shift 2; panel_update "$@" ;;
   "__limit-timer on") limit_timer_on ;;
+  "__xver "*) # служебная: xver у всех REALITY со своим доменом (возврат после неудачного --restore)
+    [[ ${2:-} =~ ^[01]$ ]] || exit 1
+    while read -r _id; do
+      inbound_patch "$_id" '.streamSettings |= ((if type == "string" then fromjson else . end) | .realitySettings.xver = $x)' --argjson x "$2" || true
+    done < <(sni_targets | awk -F'\t' '$2 == "self" {print $1}') ;;
   "__links "*) links_block "${2:-}" "${3:-}" ;;
   "update "*) shift; cmd_update "$@" ;;
   "backup "*) cmd_backup ;;
