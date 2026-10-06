@@ -6,6 +6,7 @@
 #   bash core-compat.sh v26.9.30            проверить версию ядра
 #   bash core-compat.sh                     проверить то, что сейчас стоит (контроль)
 #   MIHOMO=v1.19.32 SINGBOX=1.14.2 bash core-compat.sh v26.9.30     взять конкретные клиенты
+#   MIHOMO_SHA256=… SINGBOX_SHA256=…        свои суммы архивов клиентов, если GitHub не прислал digest
 set -Eeuo pipefail
 
 CAND=${1:-}
@@ -45,11 +46,15 @@ for a in r['assets']:
     if re.fullmatch(sys.argv[1], a['name']):
         print(a['browser_download_url'], (a.get('digest') or '').replace('sha256:', '')); break" "$3"; }
 MV=${MIHOMO:-$(latest_tag MetaCubeX/mihomo)}; SV=${SINGBOX:-$(latest_tag SagerNet/sing-box | sed 's/^v//')}
-read -r murl msum < <(fetch MetaCubeX/mihomo "$MV" "mihomo-linux-$ma-compatible-$MV.gz")
-read -r surl ssum < <(fetch SagerNet/sing-box "v$SV" "sing-box-$SV-linux-$ma.tar.gz")
-gh "$murl" >"$W/m.gz"; [[ -z $msum || $(sha256sum "$W/m.gz" | awk '{print $1}') == "$msum" ]] || { echo "Сумма mihomo не совпала." >&2; exit 1; }
+read -r murl msum < <(fetch MetaCubeX/mihomo "$MV" "mihomo-linux-$ma-compatible-$MV.gz") || true
+read -r surl ssum < <(fetch SagerNet/sing-box "v$SV" "sing-box-$SV-linux-$ma.tar.gz") || true
+# Без суммы ничего не запускаем: либо digest из GitHub, либо закреплённая вручную.
+msum=${MIHOMO_SHA256:-${msum:-}}; ssum=${SINGBOX_SHA256:-${ssum:-}}
+[[ -n ${murl:-} && $msum =~ ^[0-9a-f]{64}$ ]] || { echo "Нет архива или SHA256 для mihomo $MV (GitHub не прислал digest) – не ставлю. Задайте MIHOMO_SHA256=… со страницы релиза." >&2; exit 1; }
+[[ -n ${surl:-} && $ssum =~ ^[0-9a-f]{64}$ ]] || { echo "Нет архива или SHA256 для sing-box $SV (GitHub не прислал digest) – не ставлю. Задайте SINGBOX_SHA256=… со страницы релиза." >&2; exit 1; }
+gh "$murl" >"$W/m.gz"; [[ $(sha256sum "$W/m.gz" | awk '{print $1}') == "$msum" ]] || { echo "Сумма mihomo не совпала." >&2; exit 1; }
 gunzip -c "$W/m.gz" >"$W/mihomo"; chmod +x "$W/mihomo"
-gh "$surl" >"$W/s.tgz"; [[ -z $ssum || $(sha256sum "$W/s.tgz" | awk '{print $1}') == "$ssum" ]] || { echo "Сумма sing-box не совпала." >&2; exit 1; }
+gh "$surl" >"$W/s.tgz"; [[ $(sha256sum "$W/s.tgz" | awk '{print $1}') == "$ssum" ]] || { echo "Сумма sing-box не совпала." >&2; exit 1; }
 mkdir -p "$W/sb"; tar xzf "$W/s.tgz" -C "$W/sb" --strip-components=1
 
 link=$(KIT_NO_QR=1 kit user link "${USER_NAME:-admin}" --all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -a -E '^  vless://.*security=reality.*type=tcp' | head -1 | tr -d ' ')
