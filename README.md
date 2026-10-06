@@ -177,14 +177,7 @@ hy2 uninstall                 # удалить всё
 **3.** вставить команду из генератора.
 
 > [!NOTE]
-> **🙏 Спасибо автору XKeen.** На роутере работает не моя программа: я только собрал инструкцию
-> и генератор конфигов, а всю сложную работу сделал **jameszeroX**.
->
-> **[XKeen](https://github.com/jameszeroX/XKeen)** – прокси на Keenetic (Xray и Mihomo, политики для устройств).
-> [Репозиторий](https://github.com/jameszeroX/XKeen) · [Вики](https://github.com/jameszeroX/XKeen/wiki) · ⭐ [Поставить звезду](https://github.com/jameszeroX/XKeen)
->
-> Вопросы по самой программе задавайте в её репозитории: так автор узнаёт об ошибках. Если что-то не так
-> с моей инструкцией или генератором, пишите мне.
+> На роутере работает [XKeen](https://github.com/jameszeroX/XKeen) автора jameszeroX, спасибо ему. Вопросы по самой программе – в [её репозиторий](https://github.com/jameszeroX/XKeen/issues), по моей инструкции и генератору – мне.
 
 <details>
 <summary><b>📶 Keenetic: XKeen (jameszeroX) · 8 шагов, 20–30 минут</b></summary>
