@@ -118,6 +118,7 @@ kit net fp firefox                                     # сменить отпе
 kit net masq on                                        # Hysteria2 отвечает на чужой запрос страницей сайта
 kit net dns on                                         # DNS в подписке по DoH через прокси (ставится при установке)
 kit net panel domain | ip                               # панель и подписка по своему домену или по IP (при установке: --panel-on)
+kit net split on                                       # через VPN только список зарубежных сервисов, остальное напрямую; check | apply | off
 
 kit check [--deep] [--fix]                             # проверить сервер; --deep – ещё и подключиться клиентом, --fix – исправить безопасное
 kit update [--panel]                                   # обновить сейчас; --panel – панель 3X-UI до проверенной версии
