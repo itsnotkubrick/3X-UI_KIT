@@ -361,11 +361,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # без IP клиентов в логах
         pass
 
+    def send_connection(self):
+        # nginx на ответ с keep-alive пишет «Connection: keep-alive», перед закрытием – «Connection: close».
+        self.send_header("Connection", "close" if self.close_connection else "keep-alive")
+
     def send_plain(self, code, text=""):
         body = text.encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_connection()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -385,8 +390,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
-        if self.close_connection:
-            self.send_header("Connection", "close")
+        self.send_connection()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -454,6 +458,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if v and "\r" not in v and "\n" not in v:
                     self.send_header(k.title(), v)
         self.send_header("Content-Length", str(len(body)))
+        self.send_connection()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -546,6 +551,7 @@ def main():
         return
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.set_alpn_protocols(["http/1.1"])  # как nginx без http2: клиент предложил http/1.1 – соглашаемся
     ctx.load_cert_chain(cert, key)
     stamp = [os.path.getmtime(cert)]
 
