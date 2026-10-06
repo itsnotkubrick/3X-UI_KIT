@@ -102,7 +102,7 @@ def fix_vless_encryption(body):
         return body
     try:
         data = json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         log("JSON-подписка: тело не разобралось, отдаю как есть")
         return body
     changed = False
@@ -417,10 +417,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 acode, _, abody = upstream(sub_id + "-awg", ua, host, accept, prefix)
                 if acode == 200 and abody:
                     body = merge_awg(body, abody)
+            elif code == 200 and ("json" in headers.get("content-type", "") or (
+                    "text/plain" in headers.get("content-type", "") and body.lstrip()[:1] in (b"[", b"{"))):
+                # Панель 3.9 отдаёт JSON-подписку с Content-Type text/plain – определяем по телу.
+                body = fix_vless_encryption(body)
             elif code == 200 and "text/plain" in headers.get("content-type", ""):
                 body = strip_links(body)
-            elif code == 200 and "json" in headers.get("content-type", ""):
-                body = fix_vless_encryption(body)
             if code == 200 and clash and CONF.get("auto", True):
                 body = add_auto(body)
             if code == 200 and clash and CONF.get("dns", True):

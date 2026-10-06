@@ -1,5 +1,5 @@
 """Проверки fix_vless_encryption в kit-sub: python3 tools/test/jsonfix_test.py"""
-import json, os, tempfile, unittest, importlib.util
+import json, os, threading, urllib.request, tempfile, unittest, importlib.util
 
 root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 tmp = tempfile.mkdtemp()
@@ -71,6 +71,40 @@ class Fix(unittest.TestCase):
     def test_utf8(self):
         out = ks.fix_vless_encryption(json.dumps({"remarks": "Привет", "outbounds": [vnext()]}, ensure_ascii=False).encode())
         self.assertIn("Привет".encode(), out)
+
+    def test_deep_nesting_as_is(self):
+        raw = b"[" * 100000 + b"]" * 100000
+        self.assertEqual(ks.fix_vless_encryption(raw), raw)
+
+
+class Http(unittest.TestCase):
+    """Через настоящий обработчик, upstream подменён заглушкой."""
+    def get(self, ctype, body):
+        orig = ks.upstream
+        ks.upstream = lambda *a, **k: (200, {"content-type": ctype}, body)
+        srv = ks.Server(("127.0.0.1", 0), ks.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request("http://127.0.0.1:%d%sabc123" % (srv.server_address[1], ks.PATH),
+                                         headers={"User-Agent": "v2rayN/7"})
+            return urllib.request.urlopen(req, timeout=10).read()
+        finally:
+            srv.shutdown(); srv.server_close(); ks.upstream = orig
+
+    def test_json_text_plain(self):
+        raw = json.dumps([{"outbounds": [flat(encryption="")]}], indent=2).encode()
+        for ct in ("text/plain; charset=utf-8", "application/json"):
+            out = json.loads(self.get(ct, raw))
+            self.assertEqual(out[0]["outbounds"][0]["settings"]["encryption"], "none")
+
+    def test_json_text_plain_keeps_lines(self):
+        raw = b'{"a": "vpn://x", "outbounds": []}\n'
+        self.assertEqual(self.get("text/plain", raw), raw)
+
+    def test_plain_text_still_stripped(self):
+        out = self.get("text/plain", b"vless://a@b:1#x\nvpn://zzz\n")
+        self.assertIn(b"vless://", out)
+        self.assertNotIn(b"vpn://", out)
 
 
 if __name__ == "__main__":
