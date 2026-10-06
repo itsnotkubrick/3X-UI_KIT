@@ -1825,6 +1825,35 @@ via_vpn:
 YAML
 }
 
+# Приложениям на Xray правила раздаёт сама панель (3X-UI 3.9+): заголовок Routing для Happ и правила JSON-подписки.
+# Собираем их из того же rules.yaml. Чужой профиль, уже стоящий в панели, не трогаем.
+split_panel_ours() { # наш профиль: JSON или ссылка happ://routing/onadd/<base64> с Name "3X-UI KIT"
+  local v=$1
+  [[ $v == happ://routing/onadd/* ]] && v=$(printf '%s' "${v#happ://routing/onadd/}" | base64 -d 2>/dev/null || true)
+  grep -q '"Name":"3X-UI KIT"' <<<"$v"
+}
+
+split_panel_sync() { # on|off
+  local all cur_h cur_j h j out
+  all=$(api POST setting/all '{}') || return 1
+  cur_h=$(jq -r '.subRoutingRules // ""' <<<"$all"); cur_j=$(jq -r '.subJsonRoutingRules // ""' <<<"$all")
+  if [[ $1 == on ]]; then
+    if { [[ -n $cur_h ]] && ! split_panel_ours "$cur_h"; } || { [[ -n $cur_j ]] && ! split_panel_ours "$cur_j"; }; then
+      warn "В панели уже настроена своя маршрутизация подписки (Happ или JSON) – не меняю. Приложения на Mihomo получат список как обычно."
+      return 0
+    fi
+    h=$(python3 /usr/local/lib/kit-sub/kit_sub.py --routing-payload happ 2>/dev/null) && j=$(python3 /usr/local/lib/kit-sub/kit_sub.py --routing-payload json 2>/dev/null) \
+      || { warn "Список не разобран – для Happ и Xray ничего не менял (kit net split check)."; return 1; }
+    out=$(jq -c --arg h "$h" --arg j "$j" '.subEnableRouting = true | .subRoutingRules = $h | .subJsonRoutingRules = $j' <<<"$all")
+  else
+    [[ -n $cur_h || -n $cur_j ]] || return 0
+    if { [[ -n $cur_h ]] && ! split_panel_ours "$cur_h"; } || { [[ -n $cur_j ]] && ! split_panel_ours "$cur_j"; }; then return 0; fi
+    out=$(jq -c '.subEnableRouting = false | .subRoutingRules = "" | .subJsonRoutingRules = ""' <<<"$all")
+  fi
+  api POST setting/update "$out" >/dev/null || { warn "Панель не приняла маршрутизацию для Happ и Xray."; return 1; }
+  systemctl restart x-ui; panel_healthy || warn "Панель не ответила после перезапуска: проверьте kit check."
+}
+
 # kit-sub работает без root и читает файл сам: если права закрыты (после правки редактором, копирования), список молча не применится.
 split_perms() {
   [[ -f $SPLIT_FILE ]] || return 0
@@ -1843,7 +1872,7 @@ net_split() { # [on|off|check]
         n=$(python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules 2>&1 | grep -a '^Правил через VPN' || true)
         echo "Раздельная маршрутизация включена: $n"
         echo "Файл: $SPLIT_FILE (править, проверить: kit net split check, выключить: kit net split off)"
-        echo "Работает в приложениях на Mihomo; Karing, Hiddify, Happ и другие получают подписку как раньше."
+        echo "Mihomo-приложения берут список из подписки сами; Happ и JSON-подписка Xray – из панели (после правки файла: kit net split apply)."
       else
         echo "Раздельная маршрутизация выключена: через VPN идёт весь трафик. Включить: kit net split on"
       fi ;;
@@ -1853,12 +1882,14 @@ net_split() { # [on|off|check]
       if [[ -f $SPLIT_FILE.off ]]; then install -m 644 "$SPLIT_FILE.off" "$SPLIT_FILE"; else split_template >"$SPLIT_FILE"; fi
       chmod 755 /etc/kit-sub; chmod 644 "$SPLIT_FILE"
       say "Включил: $SPLIT_FILE"
+      split_panel_sync on || true
       echo "Сейчас через VPN идут только перечисленные сервисы (популярные иностранные сервисы: YouTube, ChatGPT, Telegram и другие), остальное напрямую."
       echo "Список правится так: nano $SPLIT_FILE, затем kit net split check."
-      echo "Приложения на Mihomo подхватят при обновлении подписки." ;;
+      echo "Приложения на Mihomo подхватят при обновлении подписки; после правки списка для Happ и Xray: kit net split apply." ;;
     off)
       [[ -f $SPLIT_FILE ]] || { say "Уже выключено."; return 0; }
       mv "$SPLIT_FILE" "$SPLIT_FILE.off"
+      split_panel_sync off || true
       say "Выключил: подписка снова отдаёт весь трафик через VPN (список сохранён: $SPLIT_FILE.off)." ;;
     check)
       [[ -f $SPLIT_FILE ]] || die "Файла нет: $SPLIT_FILE (включить: kit net split on)"
@@ -1867,7 +1898,11 @@ net_split() { # [on|off|check]
         2) die "Исправьте список: с неизвестной категорией приложения на Mihomo не смогут запустить конфиг." ;;
         *) die "Список не применится – подписка останется без раздельной маршрутизации." ;;
       esac ;;
-    *) die "kit net split [on|off|check]" ;;
+    apply)
+      [[ -f $SPLIT_FILE ]] || die "Файла нет: $SPLIT_FILE (включить: kit net split on)"
+      python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules >/dev/null 2>&1 || die "Список не применится: сначала kit net split check."
+      split_panel_sync on && say "Списки для Happ и Xray в панели обновлены (приложения на Mihomo подхватывают файл сами)." ;;
+    *) die "kit net split [on|off|check|apply]" ;;
   esac
 }
 
@@ -2224,7 +2259,7 @@ cmd_net() {
     panel) net_panel "$@" ;;
     split) net_split "$@" ;;
     vision) case ${1:-} in on) cmd_vision --all ;; off) cmd_vision --all off ;; *) die "kit net vision on|off" ;; esac ;;
-    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | panel domain|ip | split on|off|check | vision on|off]" ;;
+    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | panel domain|ip | split on|off|check|apply | vision on|off]" ;;
   esac
 }
 

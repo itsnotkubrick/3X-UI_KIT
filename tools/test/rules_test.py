@@ -121,6 +121,33 @@ class Rules(unittest.TestCase):
         for ua in ("Karing/1.2.5", "Karing/1.2.5 clash.meta", "Hiddify/2.0 clash", "sing-box/1.9", "Happ/1.0", "Stash/2.7", "v2rayN/6.0", "Mozilla/5.0"):
             self.assertFalse(gets_rules(ua), ua)
 
+    def test_routing_payloads_for_panel(self):
+        import base64
+        write("via_vpn:\n  - GEOSITE,youtube\n  - DOMAIN-SUFFIX,example.org\n  - DOMAIN,api.example.com\n  - GEOIP,telegram\n  - IP-CIDR,203.0.113.0/24\n")
+        loaded = ks.load_rules(report=lambda m: None)
+        link = ks.routing_payload("happ", loaded)
+        self.assertTrue(link.startswith("happ://routing/onadd/"))
+        h = json.loads(base64.b64decode(link.split("/onadd/")[1]))
+        self.assertEqual(h["Name"], "3X-UI KIT")
+        self.assertEqual(h["GlobalProxy"], "false")
+        self.assertEqual(h["ProxySites"], ["geosite:youtube", "domain:example.org", "full:api.example.com"])
+        self.assertEqual(h["ProxyIp"], ["geoip:telegram", "203.0.113.0/24"])
+        j = json.loads(ks.routing_payload("json", loaded))
+        self.assertEqual(j["RouteOrder"], "block-proxy-direct")
+        self.assertEqual(j["DirectSites"], ["regexp:.*"])  # остальное напрямую: панель сама добавляет «всё через прокси» в конец
+        self.assertIn("0.0.0.0/0", j["DirectIp"])
+        self.assertEqual(j["ProxyIp"][:2], ["1.1.1.1", "8.8.8.8"])
+        self.assertEqual(j["DomesticDNSDomain"], "localhost")
+        self.assertLess(len(link), 8192)  # предел панели на значение заголовка Routing
+
+    def test_full_default_template_fits_panel_limit(self):
+        t = open(os.path.join(root, "scripts", "kit.sh"), encoding="utf-8").read()
+        body = t[t.index("split_template() {"):]
+        body = body[body.index("<<'YAML'\n") + 9: body.index("\nYAML\n")]
+        write(body)
+        loaded = ks.load_rules(report=lambda m: self.fail(m))
+        self.assertLess(len(ks.routing_payload("happ", loaded)), 8192)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

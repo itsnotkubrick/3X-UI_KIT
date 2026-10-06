@@ -417,6 +417,39 @@ class Server(http.server.ThreadingHTTPServer):
     address_family = socket.AF_INET6 if ":" in CONF.get("listen", "") else socket.AF_INET
 
 
+def routing_payload(kind, loaded):
+    """Профиль маршрутизации для самой панели 3X-UI (она раздаёт его приложениям на Xray): kind = happ | json.
+    happ – заголовок Routing для Happ: через VPN только список, GlobalProxy=false.
+    json – правила для JSON-подписки Xray (серверы DoH 1.1.1.1 и 8.8.8.8 – тоже через VPN); конструктор панели всегда ставит в конец «всё через прокси», поэтому остальное
+    отправляем напрямую раньше (порядок block-proxy-direct, прямые regexp:.* и 0.0.0.0/0)."""
+    rules, direct_dns = loaded
+    sites, ips = [], []
+    for k, v in rules:
+        if k == "GEOSITE":
+            sites.append("geosite:" + v)
+        elif k == "DOMAIN-SUFFIX":
+            sites.append("domain:" + v)
+        elif k == "DOMAIN":
+            sites.append("full:" + v)
+        elif k == "DOMAIN-KEYWORD":
+            sites.append(v)
+        elif k == "GEOIP":
+            ips.append("geoip:" + v)
+        else:
+            ips.append(v)
+    if kind == "happ":
+        data = {"Name": "3X-UI KIT", "GlobalProxy": "false", "DomainStrategy": "IPIfNonMatch", "ProxySites": sites,
+                "ProxyIp": ips, "DirectIp": ["geoip:private"]}
+    else:
+        # localhost – системный DNS клиента для прямых сайтов (как в подписке Mihomo); список direct_dns его заменяет.
+        data = {"Name": "3X-UI KIT", "DomainStrategy": "IPIfNonMatch", "RouteOrder": "block-proxy-direct",
+                "ProxySites": sites, "ProxyIp": ["1.1.1.1", "8.8.8.8"] + ips, "DirectSites": ["regexp:.*"],
+                "DirectIp": ["geoip:private", "0.0.0.0/0", "::/0"], "DomesticDNSDomain": direct_dns[0] if direct_dns else "localhost"}
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    # Happ ждёт в заголовке ссылку happ://routing/onadd/<base64>; панели для JSON-подписки нужен обычный JSON.
+    return "happ://routing/onadd/" + base64.b64encode(text.encode()).decode() if kind == "happ" else text
+
+
 GEO_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/{}.dat"
 
 
@@ -435,6 +468,13 @@ def unknown_geo(kind, names):
 
 
 def main():
+    if "--routing-payload" in sys.argv:
+        # kit net split: профиль для панели (для Happ и Xray); пусто и код 1, если правил нет.
+        loaded = load_rules(report=lambda m: print(m, file=sys.stderr))
+        if not loaded:
+            raise SystemExit(1)
+        print(routing_payload(sys.argv[sys.argv.index("--routing-payload") + 1], loaded))
+        raise SystemExit(0)
     if "--check-rules" in sys.argv:
         # kit net split check: тот же разбор, что и при выдаче подписки, но с отчётом на экран.
         loaded = load_rules(report=print)
