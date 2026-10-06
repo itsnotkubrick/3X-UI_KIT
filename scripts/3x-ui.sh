@@ -1653,12 +1653,23 @@ sub_links() {
   if grep -q '://' <<<"$raw"; then echo "$raw"; else base64 -d <<<"$raw" 2>/dev/null || true; fi
 }
 
-# Файл настроек из копии можно подключать, только если в нём нет ничего, кроме
-# ИМЯ=значение без подстановок и команд.
-safe_env() {
-  [[ -r $1 ]] || die "В копии нет файла ${1##*/}."
-  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=_-]*|'[^']*'))?$" "$1" && die "В копии подозрительный файл ${1##*/} – не восстанавливаю."
+# Файл настроек из копии можно читать, только если в нём нет ничего, кроме
+# ИМЯ=значение без подстановок и команд, и все имена – из списка для этого файла.
+# Иначе чужой архив подменил бы переменные установщика или kit (RESULT, PATH, KIT_VERSION…).
+safe_env() { # файл имя...
+  local f=$1 n; shift
+  [[ -r $f ]] || die "В копии нет файла ${f##*/}."
+  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=_-]*|'[^']*'))?$" "$f" \
+    && die "Это не резервная копия 3X-UI KIT или она повреждена (файл ${f##*/}). Ничего не менял."
+  while IFS= read -r n; do
+    [[ " $* " == *" $n "* ]] || die "Это не резервная копия 3X-UI KIT или она повреждена (лишнее имя $n в ${f##*/}). Ничего не менял."
+  done < <(grep -oE '^[A-Z][A-Z0-9_]*' "$f")
   return 0
+}
+
+# Одно значение из файла, проверенного safe_env: читаем в подоболочке, основной shell не трогаем.
+env_get() { # файл имя
+  ( . "$1"; printf '%s' "${!2:-}" )
 }
 
 # Меняет старый IP на новый в базе панели и файлах kit (только целиком, 1.2.3.4 не заденет 11.2.3.45).
@@ -1736,13 +1747,22 @@ with tarfile.open(sys.argv[1], "r:gz") as t:
         t.extractall(sys.argv[2], members=ms)
 PY
   local f
-  for f in "$tmp/kit-backup.env" "$tmp/etc/x-ui/install-result.env" "$tmp/etc/kit/kit.env"; do if [[ -f $f ]]; then safe_env "$f"; fi; done
+  safe_env "$tmp/kit-backup.env" BACKUP_KIT_VERSION BACKUP_HOST BACKUP_SSL BACKUP_DATE
+  safe_env "$tmp/etc/x-ui/install-result.env" XUI_USERNAME XUI_PASSWORD XUI_PANEL_PORT XUI_WEB_BASE_PATH XUI_ACCESS_URL XUI_API_TOKEN XUI_DB_TYPE
+  [[ $(env_get "$tmp/etc/x-ui/install-result.env" XUI_PANEL_PORT) =~ ^[0-9]{1,5}$ ]] \
+    || die "Это не резервная копия 3X-UI KIT или она повреждена (порт панели). Ничего не менял."
+  if [[ -f $tmp/etc/kit/kit.env ]]; then
+    safe_env "$tmp/etc/kit/kit.env" HOST LINK_HOST PANEL_ON SUB_BASE SUB_PATH SUB_INTERNAL SINGLE MTPROTO_INNER
+  fi
   python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); assert c.execute('PRAGMA integrity_check').fetchone()[0]=='ok'; c.execute('SELECT count(*) FROM inbounds')" \
     "$tmp/etc/x-ui/x-ui.db" 2>/dev/null || die "База панели в копии повреждена. Ничего не менял."
 
-  local BACKUP_HOST="" BACKUP_SSL="" BACKUP_DATE="" BACKUP_KIT_VERSION=""
-  # shellcheck disable=SC1090
-  . "$tmp/kit-backup.env"
+  local BACKUP_HOST BACKUP_SSL BACKUP_DATE BACKUP_KIT_VERSION
+  BACKUP_HOST=$(env_get "$tmp/kit-backup.env" BACKUP_HOST)
+  BACKUP_SSL=$(env_get "$tmp/kit-backup.env" BACKUP_SSL)
+  BACKUP_DATE=$(env_get "$tmp/kit-backup.env" BACKUP_DATE)
+  BACKUP_KIT_VERSION=$(env_get "$tmp/kit-backup.env" BACKUP_KIT_VERSION)
+  [[ $BACKUP_HOST =~ ^[A-Za-z0-9.:-]+$ ]] || die "Это не резервная копия 3X-UI KIT или она повреждена (адрес сервера). Ничего не менял."
   [[ $BACKUP_SSL =~ ^(ip|custom|none)$ ]] || die "В копии нет данных о сертификате."
   PANEL_SSL=$BACKUP_SSL
   # Домен переезжает вместе с сервером (поменяйте A-запись), IP – нет.
@@ -1777,12 +1797,14 @@ PY
   # проверенные значения (путь подписки, порты, режим).
   SINGLE=no; SUB_PATH=""; SUB_INTERNAL=""; SUB_PORT=""
   if [[ -f $tmp/etc/kit/kit.env ]]; then
-    SINGLE=$(. "$tmp/etc/kit/kit.env"; echo "${SINGLE:-no}")
-    SUB_PATH=$(. "$tmp/etc/kit/kit.env"; echo "${SUB_PATH:-}")
-    LINK_HOST=$(. "$tmp/etc/kit/kit.env"; echo "${LINK_HOST:-}")
+    SINGLE=$(env_get "$tmp/etc/kit/kit.env" SINGLE); SINGLE=${SINGLE:-no}
+    SUB_PATH=$(env_get "$tmp/etc/kit/kit.env" SUB_PATH)
+    LINK_HOST=$(env_get "$tmp/etc/kit/kit.env" LINK_HOST)
     [[ $LINK_HOST =~ ^[A-Za-z0-9.:-]*$ ]] || LINK_HOST=""
-    SUB_INTERNAL=$(. "$tmp/etc/kit/kit.env"; echo "${SUB_INTERNAL:-}")
-    [[ $SINGLE =~ ^(yes|no)$ && $SUB_PATH =~ ^/[A-Za-z0-9_-]+/$ && $SUB_INTERNAL =~ ^[0-9]{1,5}$ ]] \
+    SUB_INTERNAL=$(env_get "$tmp/etc/kit/kit.env" SUB_INTERNAL)
+    # kit потом подключает этот файл от root: адрес в нём должен быть тем же, что в копии.
+    [[ $SINGLE =~ ^(yes|no)$ && $SUB_PATH =~ ^/[A-Za-z0-9_-]+/$ && $SUB_INTERNAL =~ ^[0-9]{1,5}$ \
+       && $(env_get "$tmp/etc/kit/kit.env" HOST) == "$BACKUP_HOST" ]] \
       || die "В копии странные настройки kit (kit.env) – не восстанавливаю."
   fi
   if [[ -f $tmp/etc/kit-sub/config.json ]]; then
