@@ -6,6 +6,7 @@ https://github.com/itsnotkubrick/3X-UI_KIT
 Слушает публичный адрес подписки (HTTPS) и ходит в подписку 3X-UI на 127.0.0.1:
   * Clash / Mihomo (Clash Verge, FlClash, Mihomo Party…) – конфиг 3X-UI плюс AmneziaWG
     из подписки «<id>-awg»: Mihomo умеет AmneziaWG, а остальные приложения нет;
+  * Karing и Hiddify при включённой раздельной маршрутизации (rules.yaml) – конфиг sing-box с правилами;
   * остальные приложения и браузер – ответ 3X-UI как есть (ссылки или страница);
   * заголовок Subscription-Userinfo: expire=0 («бессрочно») убирается – иначе
     приложения показывают срок «01.01.1970».
@@ -14,6 +15,7 @@ https://github.com/itsnotkubrick/3X-UI_KIT
 """
 
 import base64
+import binascii
 import http.client
 import http.server
 import ipaddress
@@ -26,6 +28,7 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import yaml
@@ -39,6 +42,9 @@ CLASH_UA = re.compile(r"clash|mihomo|flclash|stash|nyanpasu|meta", re.I)
 # AmneziaWG добавляем только приложениям на ядре Mihomo. Karing, Hiddify и другие на sing-box
 # тоже могут просить формат Clash (Karing так и делает), но AmneziaWG не умеют.
 NO_AWG_UA = re.compile(r"karing|hiddify|nekobox|sing-?box|husi|stash|shadowrocket|v2box|streisand|happ|loon|surge|quantumult", re.I)
+# Karing и Hiddify (ядро sing-box) при включённой раздельной маршрутизации получают конфиг sing-box с правилами.
+# Karing в User-Agent перечисляет и clash, и mihomo – поэтому эта проверка идёт раньше проверки на Clash.
+SINGBOX_UA = re.compile(r"karing|hiddify", re.I)
 SUB_ID = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 # Страница подписки для браузера (React от 3X-UI) подгружает скрипты и стили из «<путь>/assets/…»: пропускаем только такие файлы.
 ASSET = re.compile(r"^assets/[A-Za-z0-9_.-]{1,128}\.(js|css|woff2?|svg|png|ico|map)$")
@@ -335,6 +341,256 @@ def apply_rules(clash_yaml, loaded):
     return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False).encode()
 
 
+# --- Конфиг sing-box для Karing и Hiddify (формат sing-box 1.12 и новее) ---
+# Источник – обычный список ссылок той же подписки (запрашивается у 3X-UI с нейтральным User-Agent), правила – из load_rules().
+# Всё собирается словарями и выдаётся через json.dumps: значения из ссылок и rules.yaml в JSON не склеиваются строками.
+# Не попадают: XHTTP, WireGuard, AmneziaWG, MTProto (sing-box их не умеет или им нужен отдельный формат), а также
+# подключения с закреплённым отпечатком или без проверки сертификата (sing-box не умеет закреплять – не ослабляем проверку).
+LINKS_UA = "kit-sub"
+SB_PROXY, SB_AUTO, SB_DIRECT = "Прокси", "Авто", "direct"
+SRS_URL = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/{}/{}.srs"
+SRS_NAME = re.compile(r"^[a-z0-9][a-z0-9_.!@-]{0,79}$")  # без «/», «:», «%» и «..»: адрес загрузки не уходит из папки
+SB_HOST = re.compile(r"^[A-Za-z0-9.:-]{1,253}$")
+SB_FP = ("chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android", "random", "randomized")
+SS_METHODS = ("aes-128-gcm", "aes-256-gcm", "chacha20-poly1305", "chacha20-ietf-poly1305", "xchacha20-poly1305",
+              "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305")
+
+
+def srs_ok(name):
+    return bool(SRS_NAME.match(name)) and ".." not in name
+
+
+def _b64(s):
+    s = re.sub(r"\s+", "", s).replace("-", "+").replace("_", "/")
+    return base64.b64decode(s + "=" * (-len(s) % 4), validate=True).decode("utf-8")
+
+
+def _host_port(u):
+    host, port = u.hostname or "", u.port or 443  # u.port сам бросает ValueError на мусор
+    if not SB_HOST.match(host) or not 1 <= port <= 65535:
+        raise ValueError("адрес")
+    return {"server": host, "server_port": port}
+
+
+def _first(q, *keys):
+    return next((q[k][0] for k in keys if q.get(k) and q[k][0]), "")
+
+
+def _truthy(v):
+    return v in ("1", "true", "True")
+
+
+def _sb_tls(q, server, default="none"):
+    sec = (_first(q, "security") or default).lower()
+    if sec == "none":
+        return None
+    if sec not in ("tls", "reality") or _first(q, "pcs", "pinSHA256") or _truthy(_first(q, "allowInsecure", "insecure")):
+        raise ValueError("tls")
+    t = {"enabled": True, "server_name": _first(q, "sni", "peer") or _first(q, "host") or server}
+    alpn = [a.strip() for a in _first(q, "alpn").split(",") if a.strip()]
+    if alpn:
+        t["alpn"] = alpn
+    fp = _first(q, "fp") or ("chrome" if sec == "reality" else "")
+    if fp:  # отпечаток, которого sing-box не знает, сломал бы весь конфиг
+        t["utls"] = {"enabled": True, "fingerprint": fp if fp in SB_FP else "chrome"}
+    if sec == "reality":
+        if not _first(q, "pbk"):
+            raise ValueError("pbk")
+        t["reality"] = {"enabled": True, "public_key": _first(q, "pbk")}
+        if _first(q, "sid"):
+            t["reality"]["short_id"] = _first(q, "sid")
+    return t
+
+
+def _sb_transport(q):
+    net = (_first(q, "type") or "tcp").lower()
+    path, host = _first(q, "path") or "/", _first(q, "host")
+    if net in ("tcp", "raw"):
+        if _first(q, "headerType") == "http":
+            return {"type": "http", "path": path, **({"host": [host]} if host else {})}
+        return None
+    if net == "ws":
+        return {"type": "ws", "path": path, **({"headers": {"Host": host}} if host else {})}
+    if net == "httpupgrade":
+        return {"type": "httpupgrade", "path": path, **({"host": host} if host else {})}
+    if net == "grpc":
+        sn = _first(q, "serviceName", "path")
+        return {"type": "grpc", **({"service_name": sn} if sn else {})}
+    raise ValueError("транспорт " + net)  # xhttp и прочее sing-box не умеет
+
+
+def _sb_vmess(link):
+    j = json.loads(_b64(link[len("vmess://"):].split("#")[0]))
+    if not isinstance(j, dict) or not j.get("id") or not j.get("add"):
+        raise ValueError("vmess")
+    net = str(j.get("net") or "tcp")
+    q = {"type": [net], "security": [str(j.get("tls") or "none")]}
+    for k, src in (("host", "host"), ("sni", "sni"), ("alpn", "alpn"), ("fp", "fp"), ("pbk", "pbk"), ("sid", "sid")):
+        if j.get(src):
+            q[k] = [str(j[src])]
+    if j.get("path"):
+        q["serviceName" if net == "grpc" else "path"] = [str(j["path"])]
+    if j.get("type") and j["type"] != "none" and net != "grpc":
+        q["headerType"] = [str(j["type"])]
+    u = urllib.parse.urlsplit("vmess://x@" + ("[%s]" % j["add"] if ":" in str(j["add"]) else str(j["add"])) + ":" + str(j.get("port")))
+    o = {"type": "vmess", **_host_port(u), "uuid": str(j["id"]), "security": str(j.get("scy") or "auto"),
+         "alter_id": int(j.get("aid") or 0)}
+    return str(j.get("ps") or ""), o, q
+
+
+def sb_outbound(link):
+    """Одна ссылка → (имя, outbound sing-box). Неподдерживаемое – ValueError."""
+    scheme = link.split("://", 1)[0].lower()
+    if scheme == "vmess":
+        name, o, q = _sb_vmess(link)
+    else:
+        u = urllib.parse.urlsplit(link)
+        q = urllib.parse.parse_qs(u.query)
+        name = urllib.parse.unquote(u.fragment)
+        user = urllib.parse.unquote(u.username or "")
+        if scheme == "vless":
+            if not user or _first(q, "encryption") not in ("", "none"):
+                raise ValueError("vless")
+            o = {"type": "vless", **_host_port(u), "uuid": user}
+            if _first(q, "flow"):
+                o["flow"] = _first(q, "flow")
+        elif scheme == "trojan":
+            if not user:
+                raise ValueError("trojan")
+            o = {"type": "trojan", **_host_port(u), "password": user}
+            q.setdefault("security", ["tls"])
+        elif scheme == "ss":
+            if _first(q, "plugin"):
+                raise ValueError("ss plugin")
+            info = user if ":" in user else _b64(user)
+            method, _, pw = info.partition(":")
+            if method.lower() not in SS_METHODS or not pw:
+                raise ValueError("ss")
+            return name, {"type": "shadowsocks", **_host_port(u), "method": method.lower(), "password": pw}
+        elif scheme in ("hy2", "hysteria2", "tuic"):
+            if re.search(r":\d+[-,]", u.netloc) or _first(q, "pinSHA256") or _truthy(_first(q, "insecure", "allow_insecure")):
+                raise ValueError(scheme)
+            pw = urllib.parse.unquote(u.password or "")
+            t = {"enabled": True, "server_name": _first(q, "sni") or u.hostname or ""}
+            alpn = [a.strip() for a in _first(q, "alpn").split(",") if a.strip()]
+            if scheme == "tuic":
+                if not user or not pw:
+                    raise ValueError("tuic")
+                t["alpn"] = alpn or ["h3"]
+                return name, {"type": "tuic", **_host_port(u), "uuid": user, "password": pw, "tls": t,
+                              "congestion_control": _first(q, "congestion_control") or "bbr",
+                              "udp_relay_mode": _first(q, "udp_relay_mode") or "native"}
+            auth = user + (":" + pw if pw else "")
+            if not auth:
+                raise ValueError("hy2")
+            if alpn:
+                t["alpn"] = alpn
+            o = {"type": "hysteria2", **_host_port(u), "password": auth, "tls": t}
+            obfs = _first(q, "obfs")
+            if obfs:
+                if obfs != "salamander":
+                    raise ValueError("obfs")
+                o["obfs"] = {"type": "salamander", "password": _first(q, "obfs-password")}
+            return name, o
+        else:
+            raise ValueError(scheme)  # vpn:// (AmneziaWG), tg://, wireguard:// и прочее
+    tls = _sb_tls(q, o["server"])
+    if tls:
+        o["tls"] = tls
+    tr = _sb_transport(q)
+    if tr:
+        o["transport"] = tr
+    return name, o
+
+
+def singbox_config(links_body, loaded):
+    """Список ссылок 3X-UI + правила → конфиг sing-box (bytes) или None, если не из чего собрать (тогда подписка прежняя).
+    Через VPN – только список, остальное напрямую (final: direct). DNS без утечек: имена из списка разрешаются по DoH
+    через VPN (detour), остальные – системным DNS или direct_dns; DoH-серверы 1.1.1.1 и 8.8.8.8 и сами идут через VPN.
+    Категории GEOSITE/GEOIP – готовые наборы .srs с фиксированного адреса, скачиваются тоже через VPN (download_detour)."""
+    if len(links_body) > JSON_FIX_MAX:
+        return None
+    text = links_body.decode("utf-8", "replace").strip()
+    if "://" not in text:
+        try:
+            text = _b64(text)
+        except (ValueError, UnicodeError):
+            return None
+    outs, tags = [], {SB_PROXY, SB_AUTO, SB_DIRECT}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "://" not in line:
+            continue
+        try:
+            name, o = sb_outbound(line)
+        except (ValueError, KeyError, TypeError, UnicodeError, binascii.Error, RecursionError):
+            continue
+        base = re.sub(r"[\x00-\x1f\x7f]", "", name).strip()[:64] or o["type"]
+        tag, n = base, 2
+        while tag in tags:
+            tag, n = f"{base} {n}", n + 1
+        tags.add(tag)
+        outs.append({"tag": tag, **o})
+    if not outs:
+        return None
+    names = [o["tag"] for o in outs]
+    rules, direct_dns = loaded
+
+    def pick(kind):  # без повторов, домены – строчными
+        out = []
+        for k, v in rules:
+            v = v.lower() if k != "IP-CIDR" and k != "IP-CIDR6" else v
+            if k == kind and v not in out:
+                out.append(v)
+        return out
+
+    sets = [(kind, v) for kind in ("geosite", "geoip") for v in pick(kind.upper()) if srs_ok(v)]
+    dom = {"domain": pick("DOMAIN"), "domain_suffix": pick("DOMAIN-SUFFIX"), "domain_keyword": pick("DOMAIN-KEYWORD")}
+    # Каждое правило – с непустым условием: пустое правило в sing-box совпадает со всем.
+    by_name = [r for r in ({k: v for k, v in dom.items() if v},
+                           {"rule_set": [f"geosite-{v}" for k, v in sets if k == "geosite"]}) if any(r.values())]
+    by_ip = [r for r in ({"ip_cidr": pick("IP-CIDR") + pick("IP-CIDR6")},
+                         {"rule_set": [f"geoip-{v}" for k, v in sets if k == "geoip"]}) if any(r.values())]
+    if not by_name and not by_ip:
+        return None
+    dns_servers = [{"type": "https", "tag": "dns-proxy", "server": "1.1.1.1", "detour": SB_PROXY},
+                   {"type": "local", "tag": "dns-local"},
+                   # Имена самих серверов (если сервер задан доменом) – по DoH напрямую, как в подписке Mihomo.
+                   {"type": "https", "tag": "dns-bootstrap", "server": "1.1.1.1"}]
+    final_dns = "dns-local"
+    if direct_dns:
+        d = urllib.parse.urlsplit(direct_dns[0])
+        srv = {"type": "https", "tag": "dns-direct", "server": d.hostname, "path": d.path or "/dns-query"}
+        if d.port:
+            srv["server_port"] = d.port
+        try:
+            ipaddress.ip_address(d.hostname)
+        except ValueError:
+            srv["domain_resolver"] = "dns-bootstrap"
+        dns_servers.append(srv)
+        final_dns = "dns-direct"
+    dns_rules = [dict(r, server="dns-proxy") for r in by_name]
+    route_rules = [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"},
+                   {"ip_is_private": True, "outbound": SB_DIRECT},
+                   {"ip_cidr": ["1.1.1.1/32", "8.8.8.8/32"], "outbound": SB_PROXY}] + [dict(r, outbound=SB_PROXY) for r in by_name + by_ip]
+    auto = [SB_AUTO] if len(outs) > 1 else []
+    cfg = {
+        "log": {"level": "warn"},
+        "dns": {"servers": dns_servers, "rules": dns_rules, "final": final_dns, "strategy": "ipv4_only"},
+        "outbounds": [{"type": "selector", "tag": SB_PROXY, "outbounds": auto + names, "default": (auto + names)[0]}]
+        + ([{"type": "urltest", "tag": SB_AUTO, "outbounds": names, "url": "https://www.gstatic.com/generate_204",
+             "interval": "5m", "tolerance": 100}] if auto else [])
+        + outs + [{"type": "direct", "tag": SB_DIRECT}],
+        "route": {"rules": route_rules,
+                  "rule_set": [{"type": "remote", "tag": f"{k}-{v}", "format": "binary", "url": SRS_URL.format(k, v),
+                                "download_detour": SB_PROXY} for k, v in sets],
+                  "final": SB_DIRECT, "auto_detect_interface": True, "default_domain_resolver": "dns-bootstrap"},
+    }
+    if not cfg["route"]["rule_set"]:
+        del cfg["route"]["rule_set"]
+    return json.dumps(cfg, ensure_ascii=False, indent=1).encode()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "nginx"
     sys_version = ""
@@ -401,6 +657,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ua = self.headers.get("User-Agent", "")
         host = CONF.get("link_host") or self.headers.get("Host", CONF.get("host", ""))
         accept = self.headers.get("Accept", "")
+        if prefix == PATH and SUB_ID.match(sub_id) and not sub_id.endswith(("-awg", "-tg")) and SINGBOX_UA.search(ua[:512]):
+            # Karing и Hiddify: при включённой раздельной маршрутизации – конфиг sing-box с правилами. User-Agent приложения
+            # нужен только для выбора формата: панели уходит нейтральный, в ответ он не попадает. Не вышло – подписка прежняя.
+            loaded = load_rules()
+            if loaded:
+                scode, sheaders, sbody = upstream(sub_id, LINKS_UA, host, "*/*", prefix)
+                try:
+                    out = singbox_config(sbody, loaded) if scode == 200 else None
+                except (ValueError, TypeError, KeyError, UnicodeError) as e:
+                    log(f"конфиг sing-box не собран: {e}")
+                    out = None
+                if out:
+                    log(f"{ua[:80]!r} → sing-box+rules")
+                    sheaders = {k: v for k, v in sheaders.items() if k not in ("content-type", "content-disposition")}
+                    sheaders["content-type"] = "application/json; charset=utf-8"
+                    return self.reply(200, sheaders, out)
         code, headers, body = upstream(sub_id, ua, host, accept, prefix)
         if code is None:
             return self.send_html_error(502)
@@ -435,7 +707,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     body = apply_rules(body, loaded)
         except (yaml.YAMLError, UnicodeError) as e:
             log(f"не удалось обработать подписку: {e}")
+        self.reply(code, headers, body)
 
+    def reply(self, code, headers, body):
         self.send_response(code)
         for k in PASS_HEADERS:
             if k in headers:
@@ -507,6 +781,26 @@ def unknown_geo(kind, names):
     return [n for n in names if b"\x0a" + bytes([len(n)]) + n.upper().encode() not in data]
 
 
+def unknown_srs(kind, names):
+    """То же для Karing и Hiddify: у каждой категории должен быть готовый набор .srs (иначе sing-box не запустит конфиг).
+    Имя с недопустимыми символами в их конфиг не попадает – о нём тоже сообщаем. Нет доступа к GitHub – не проверяем."""
+    bad = []
+    for n in names:
+        if not srs_ok(n.lower()):
+            bad.append(n)
+            continue
+        try:
+            req = urllib.request.Request(SRS_URL.format(kind, n.lower()), method="HEAD")
+            urllib.request.urlopen(req, timeout=15).close()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                bad.append(n)
+        except (urllib.error.URLError, OSError) as e:
+            print(f"Наборы {kind.upper()} для Karing и Hiddify не проверил: GitHub недоступен ({e}).")
+            break
+    return bad
+
+
 def main():
     if "--routing-payload" in sys.argv:
         # kit net split: профиль для панели (для Happ и Xray); пусто и код 1, если правил нет.
@@ -521,6 +815,8 @@ def main():
         if loaded:
             print(f"Правил через VPN: {len(loaded[0])}; DNS для остального: {', '.join(loaded[1]) or 'системный'}")
             bad = [f"{k} {n}" for k in ("geosite", "geoip") for n in unknown_geo(k, [v for kk, v in loaded[0] if kk == k.upper()])]
+            if not bad:  # по базе всё есть – сверяем ещё наборы sing-box (Karing и Hiddify)
+                bad = [f"{k} {n}" for k in ("geosite", "geoip") for n in unknown_srs(k, [v for kk, v in loaded[0] if kk == k.upper()])]
             if bad:
                 print("Нет такой категории: " + ", ".join(bad) + ". Приложение не сможет запустить конфиг – исправьте или удалите эти строки.")
                 raise SystemExit(2)
