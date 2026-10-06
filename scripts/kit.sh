@@ -727,7 +727,7 @@ cmd_update() {
 
 # kit check только читает и показывает, что с сервером. kit fix чинит безопасное: перезапускает
 # упавшие службы, возвращает права на файлы, включает автообновление, перечитывает сертификат.
-CHECK_BAD=0; CHECK_WARN=0; CHECK_FIX=(); CHECK_QUIET=no
+CHECK_BAD=0; CHECK_WARN=0; CHECK_FIX=(); CHECK_QUIET=no; CHECK_DEEP=no
 c_ok()   { [[ $CHECK_QUIET == yes ]] || printf '%s\n' "${G}✅${N} $*"; }
 c_info() { [[ $CHECK_QUIET == yes ]] || printf '%s\n' "${D}ℹ  $*${N}"; }
 c_warn() { printf '%s\n' "${Y}⚠${N}  $*"; CHECK_WARN=$((CHECK_WARN + 1)); }
@@ -735,6 +735,66 @@ c_bad()  { printf '%s\n' "${R}❌${N} ${*:2}"; CHECK_BAD=$((CHECK_BAD + 1)); [[ 
 
 # Сайт маскировки отвечает по TLS 1.3 и HTTP/2 (как требует REALITY)? Проверка с самого сервера.
 sni_alive() { echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -tls1_3 -alpn h2 2>/dev/null | grep -q 'ALPN protocol: h2'; }
+
+# Порт подключения открыт? TCP и UDP смотрим отдельно: на 443/tcp сидит nginx, на 443/udp – Hysteria2.
+inbound_listens() { # порт tcp|udp|both
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  case $2 in
+    tcp) ss -Hltn "sport = :$1" 2>/dev/null | grep -q . ;;
+    udp) ss -Hlun "sport = :$1" 2>/dev/null | grep -q . ;;
+    *) inbound_listens "$1" tcp && inbound_listens "$1" udp ;;
+  esac
+}
+
+inbounds_down() { # [список-json] → «имя<TAB>порт<TAB>сеть» включённых подключений, чей порт никто не слушает
+  local list=${1:-} name port proto net
+  [[ -n $list ]] || list=$(api GET inbounds/list)
+  while IFS=$'\t' read -r name port proto; do
+    [[ -n $name ]] || continue
+    net=$(port_net "$proto")
+    inbound_listens "$port" "$net" || printf '%s\t%s\t%s\n' "$name" "$port" "${net/both/tcp+udp}"
+  done < <(jq -r '.[] | select(.enable == true) | [.remark, .port, .protocol] | @tsv' <<<"$list")
+}
+
+xray_restart_core() { # только ядро, панель не трогаем; если API не ответил – вся служба
+  if ! (api POST server/restartXrayService >/dev/null) 2>/dev/null; then
+    systemctl restart x-ui; panel_healthy || true
+  fi
+  sleep 3
+}
+
+# Панель 3.9.0 меняет подключение на ходу через API ядра: старое удаляет, а новое с маскировкой Hysteria2
+# ядро 26.6.27 не принимает (форматы настроек у панели и ядра разошлись), и порт закрывается. Сама панель
+# ядро не перезапускает: config.json уже верный. Поэтому после правки сверяем порты и при нужде перезапускаем ядро.
+xray_heal() { # «было-не-слушало» (вывод inbounds_down до правки)
+  local before=${1:-} down new
+  sleep 1
+  down=$(inbounds_down 2>/dev/null) || return 0
+  new=$(grep -vxF -f <(printf '%s\n' "$before") <<<"$down" || true)
+  [[ -n $new ]] || return 0
+  say "Ядро Xray не применило изменение на ходу ($(cut -f1 <<<"$new" | paste -sd, - | sed 's/,/, /g')) – перезапускаю ядро, подключения прервутся на пару секунд."
+  xray_restart_core
+  down=$(inbounds_down 2>/dev/null) || return 0
+  new=$(grep -vxF -f <(printf '%s\n' "$before") <<<"$down" || true)
+  [[ -z $new ]] || warn "После перезапуска ядра не слушают: $(cut -f1,2 <<<"$new" | tr '\t' ':' | paste -sd' ' -). Журнал: tail -n 30 /var/log/x-ui/3xui.log"
+}
+
+# Ядро Xray запущено и каждое включённое подключение слушает свой порт (при --deep – построчно).
+check_xray() {
+  local pid list name port proto net total=0 bad=0
+  systemctl is-active -q x-ui || return 0 # про службу сказано выше
+  pid=$(systemctl show -p MainPID --value x-ui 2>/dev/null || true)
+  if [[ $pid =~ ^[1-9][0-9]*$ ]] && pgrep -P "$pid" '^xray-linux-' >/dev/null 2>&1; then c_ok "ядро Xray запущено"
+  else c_bad xray "ядро Xray не запущено (причина в журнале: tail -n 30 /var/log/x-ui/3xui.log)"; fi
+  list=$(api GET inbounds/list 2>/dev/null) || return 0
+  while IFS=$'\t' read -r name port proto; do
+    [[ -n $name ]] || continue
+    net=$(port_net "$proto"); net=${net/both/tcp+udp}; total=$((total + 1))
+    if inbound_listens "$port" "${net/tcp+udp/both}"; then [[ $CHECK_DEEP != yes ]] || c_ok "$name: порт $port/$net слушает"
+    else bad=1; c_bad xray "$name: порт $port/$net не слушает (подключение включено, но порт никто не открыл)"; fi
+  done < <(jq -r '.[] | select(.enable == true) | [.remark, .port, .protocol] | @tsv' <<<"$list")
+  ((bad)) || [[ $CHECK_DEEP == yes ]] || c_ok "все включённые подключения слушают свои порты ($total)"
+}
 
 check_services() {
   local pid u
@@ -805,7 +865,7 @@ check_exposure() {
     else c_ok "панель слушает только localhost"; fi
   fi
   if [[ ${SINGLE:-no} == yes ]]; then
-    if ss -ltnH 'sport = :443' 2>/dev/null | grep -q .; then c_ok "порт 443 слушается"; else c_bad svc:nginx "порт 443 никто не слушает"; fi
+    if ss -ltnH 'sport = :443' 2>/dev/null | grep -q .; then c_ok "порт 443/tcp слушается (nginx)"; else c_bad svc:nginx "порт 443/tcp никто не слушает"; fi
     if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
       if ufw status | grep -Eq '^443/tcp +ALLOW'; then c_ok "ufw пропускает 443/tcp"; else c_bad "" "ufw не пропускает 443/tcp: ufw allow 443/tcp"; fi
     fi
@@ -907,20 +967,12 @@ check_stealth() {
 
 run_checks() {
   CHECK_BAD=0; CHECK_WARN=0; CHECK_FIX=()
-  check_services; check_versions; check_cert; check_exposure; check_subscription; check_masking; check_stealth; check_system
+  check_services; check_xray; check_versions; check_cert; check_exposure; check_subscription; check_masking; check_stealth; check_system
 }
 
 # kit check --deep: подключения проверяются так, как это делает клиент, – с самого сервера.
-# Порты: каждое включённое подключение должно слушать. Сами подключения: настоящий клиент Xray ходит
-# через REALITY (TCP и XHTTP) на публичный адрес сервера и открывает страницу через него.
-deep_ports() {
-  local list name port
-  list=$(api GET inbounds/list 2>/dev/null) || { c_bad "" "не удалось получить подключения из панели"; return 0; }
-  while IFS=$'\t' read -r name port; do
-    if ss -Hlntu "sport = :$port" 2>/dev/null | grep -q .; then c_ok "$name: порт $port слушает"
-    else c_bad "" "$name: порт $port не слушает (подключение включено, но сервис не открыл порт)"; fi
-  done < <(jq -r '.[] | select(.enable == true) | [.remark, .port] | @tsv' <<<"$list")
-}
+# Порты (каждое включённое подключение должно слушать) – в check_xray, построчно. Сами подключения: настоящий клиент Xray
+# ходит через REALITY (TCP и XHTTP) и Hysteria2 на публичный адрес сервера и открывает страницу через него.
 
 # Отпечаток сертификата Hysteria2 из самого подключения: в ссылке его может не быть (сертификат Let's Encrypt или свой).
 deep_hy_pin() {
@@ -1008,8 +1060,9 @@ cmd_check() {
   [[ -z ${1:-} || $deep == yes ]] || die "Команда: kit check [--deep | --fix]"
   echo "${B}kit check${N} – проверка сервера (ничего не меняет)"
   echo
+  CHECK_DEEP=$deep
   run_checks
-  if [[ $deep == yes ]]; then echo; echo "${B}Подключения${N}"; deep_ports; deep_clients; fi
+  if [[ $deep == yes ]]; then echo; echo "${B}Подключения${N}"; deep_clients; fi
   echo
   if ((CHECK_BAD == 0)); then
     echo "${G}${B}Всё в порядке.${N}$( ((CHECK_WARN)) && echo " Предупреждений: $CHECK_WARN." || true)"
@@ -1026,6 +1079,7 @@ fix_action() { # код
       if nginx -t >/dev/null 2>&1; then say "Перезапускаю nginx"; systemctl restart nginx
       else warn "Конфиг nginx не проходит проверку (nginx -t) – не трогаю, чтобы не сломать сервер."; fi ;;
     svc:kit-sub) say "Перезапускаю kit-sub"; systemctl restart kit-sub; sleep 2 ;;
+    xray) say "Перезапускаю ядро Xray"; xray_restart_core ;;
     subtls)
       say "Убираю сертификат у встроенной подписки 3X-UI (TLS снимает nginx, kit-sub ходит по http)"
       local all upd
@@ -1567,13 +1621,14 @@ port_set() { # имя порт
   local ufw_on=no
   command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active' && ufw_on=yes
   [[ $ufw_on == no ]] || port_ufw allow "$new" "$net"
+  local before; before=$(inbounds_down "$list")
   if ! (api POST "inbounds/update/$id" "$body" >/dev/null); then
     [[ $ufw_on == no ]] || port_ufw delete "$new" "$net"
     die "Панель не приняла новый порт. Ничего не изменилось."
   fi
   [[ $ufw_on == no ]] || port_ufw delete "$old" "$net"
-  sleep 2
-  if ss -Hlntu "sport = :$new" 2>/dev/null | grep -q .; then say "$name теперь на порту ${B}$new${N} (был $old)."
+  xray_heal "$before"
+  if inbound_listens "$new" "$net"; then say "$name теперь на порту ${B}$new${N} (был $old)."
   else warn "$name переведён на порт $new, но он пока не слушает: проверьте kit check --deep."; fi
   echo "Подписка обновит ссылки сама. Сохранённые вручную ссылки на $name нужно заменить: ${B}kit user link имя --all${N}"
   echo "Если у хостера есть свой межсетевой экран (в личном кабинете), откройте в нём порт $new ($net) и закройте $old."
@@ -2176,12 +2231,15 @@ inbound_body_of() { # строка подключения (json) → тело д
 }
 
 inbound_patch() { # id фильтр-jq [аргументы jq...]: меняет подключение, ошибка – код возврата, не выход
-  local id=$1 filter=$2 row new
+  local id=$1 filter=$2 row new list before
   shift 2
-  row=$(api GET inbounds/list | jq -c --argjson id "$id" '.[] | select(.id == $id)')
+  list=$(api GET inbounds/list)
+  row=$(jq -c --argjson id "$id" '.[] | select(.id == $id)' <<<"$list")
   [[ -n $row ]] || return 1
   new=$(jq -c "$@" "$filter" <<<"$row") || return 1
+  before=$(inbounds_down "$list")
   (api POST "inbounds/update/$id" "$(inbound_body_of "$new")" >/dev/null) || return 1
+  xray_heal "$before"
 }
 
 net_show() {
@@ -2241,7 +2299,9 @@ net_toggle() { # on|off имя [-y]
   else
     [[ $en == true ]] && { say "$name уже включён."; return 0; }
     if [[ $listen != 127.0.0.1 ]] && command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then port_ufw allow "$port" "$net"; fi
+    local before; before=$(inbounds_down)
     (api POST "inbounds/setEnable/$id" '{"enable":true}' >/dev/null) || die "Панель не приняла изменение. Ничего не изменилось."
+    xray_heal "$before"
     say "$name включён."
   fi
 }
