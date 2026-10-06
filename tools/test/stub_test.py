@@ -67,6 +67,10 @@ class Stub(unittest.TestCase):
         self.assertEqual(len(layouts), 5)
         themes = {re.search(r"<title>.*? (\S+)</title>", p).group(1) for p in PAGES}
         self.assertGreaterEqual(len(themes), 25)  # последние слова названий: Coffee, Bakery, Photography…
+        # Ни одно окончание названия не встречается заметно чаще других (было: «Studio» у каждого пятого).
+        ends = [re.search(r"<title>.*? (\S+)</title>", p).group(1) for p in PAGES]
+        top = max(set(ends), key=ends.count)
+        self.assertLess(ends.count(top), N * 0.08, (top, ends.count(top)))
 
 
 if __name__ == "__main__":
