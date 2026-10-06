@@ -837,12 +837,17 @@ connect_panel() {
   # shellcheck disable=SC1090
   . "$XUI_ENV"
   TOKEN=$XUI_API_TOKEN
-  local scheme
-  for scheme in https http; do
-    API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
-    curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $XUI_API_TOKEN" "$API/server/getNewUUID" 2>/dev/null && break
+  local scheme i
+  # Панель только что запущена и отвечает не сразу: перебираем обе схемы заново, пока не ответит (раньше после первой неудачной
+  # проверки скрипт оставался на http и до конца стучался по http в порт с TLS).
+  for i in $(seq 1 60); do
+    for scheme in https http; do
+      API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
+      curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $XUI_API_TOKEN" "$API/server/getNewUUID" 2>/dev/null && return 0
+    done
+    sleep 2
   done
-  wait_panel
+  die "Панель не отвечает. Лог: journalctl -u x-ui -n 50"
 }
 
 # Архив ядра: скачиваем по очереди с GitHub и с зеркала и принимаем только тот, чья SHA256 совпала.
@@ -1666,9 +1671,15 @@ rx = re.compile(r"(?<![0-9.])" + re.escape(old) + r"(?![0-9])")
 sub = lambda v: rx.sub(new, v) if isinstance(v, str) else v
 db = sqlite3.connect("/etc/x-ui/x-ui.db")
 db.create_function("kit_sub", 1, sub)
-for table, cols in (("inbounds", ("settings", "stream_settings")), ("settings", ("value",))):
+# hosts – адреса для ссылок подписки (панель 3.9+): если их не заменить, часть ссылок после переезда ведёт на старый IP.
+for table, cols in (("inbounds", ("settings", "stream_settings")), ("settings", ("value",)),
+                    ("hosts", ("address", "sni", "host_header", "remark", "server_description"))):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone():
+        continue
+    have = {r[1] for r in db.execute("PRAGMA table_info(%s)" % table)}
     for c in cols:
-        db.execute("UPDATE %s SET %s = kit_sub(%s)" % (table, c, c))
+        if c in have:
+            db.execute("UPDATE %s SET %s = kit_sub(%s)" % (table, c, c))
 db.commit(); db.close()
 for f in files:
     s = open(f).read()
@@ -1806,6 +1817,8 @@ PY
     local files=()
     for f in "$XUI_ENV" /etc/kit/kit.env "$RESULT"; do if [[ -f $f ]]; then files+=("$f"); fi; done
     replace_host "$old_ip" "$HOST" "${files[@]}"
+    # Адрес в ссылках, взятый из копии, тоже был старым IP (со своим доменом он остаётся доменом).
+    [[ ${LINK_HOST:-} == "$old_ip" ]] && LINK_HOST=$HOST
   fi
   systemctl start x-ui
   connect_panel
