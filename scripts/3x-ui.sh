@@ -1861,6 +1861,13 @@ with tarfile.open(sys.argv[1], "r:gz") as t:
     for need in ("etc/x-ui/x-ui.db", "etc/x-ui/install-result.env", "kit-backup.env"):
         if need not in names:
             sys.exit("нет " + need)
+    # Каталог сертификата есть – в нём оба файла, иначе установка споткнётся на полпути.
+    files = {m.name for m in ms if m.isfile() and m.size > 0}
+    for c in ("root/cert/self", "root/cert/custom"):
+        if any(n == c or n.startswith(c + "/") for n in names):
+            for f in ("fullchain.pem", "privkey.pem"):
+                if c + "/" + f not in files:
+                    sys.exit("нет " + c + "/" + f)
     if hasattr(tarfile, "data_filter"):
         t.extractall(sys.argv[2], members=ms, filter="data")
     else:
@@ -1884,6 +1891,8 @@ PY
   BACKUP_KIT_VERSION=$(env_get "$tmp/kit-backup.env" BACKUP_KIT_VERSION)
   [[ $BACKUP_HOST =~ ^[A-Za-z0-9.:-]+$ ]] || die "Это не резервная копия 3X-UI KIT или она повреждена (адрес сервера). Ничего не менял."
   [[ $BACKUP_SSL =~ ^(ip|custom|none)$ ]] || die "В копии нет данных о сертификате."
+  [[ $BACKUP_SSL != custom || -f $tmp/root/cert/custom/fullchain.pem ]] \
+    || die "Это не резервная копия 3X-UI KIT или она повреждена (нет своего сертификата). Ничего не менял."
   PANEL_SSL=$BACKUP_SSL
   # Домен переезжает вместе с сервером (поменяйте A-запись), IP – нет.
   if [[ $BACKUP_HOST =~ ^[0-9.]+$ ]]; then
