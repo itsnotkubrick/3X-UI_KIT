@@ -372,6 +372,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def send_error(self, code, message=None, explain=None):
         # Свои ответы вместо страницы ошибок Python, в том же виде, что у обычного nginx.
+        # На мусорную строку запроса Python считает запрос HTTP/0.9 и пишет одно тело, без строки статуса;
+        # nginx отвечает «HTTP/1.1 400 Bad Request» с заголовками.
+        self.request_version = "HTTP/1.1"
         self.close_connection = True
         self.send_html_error(code)
 

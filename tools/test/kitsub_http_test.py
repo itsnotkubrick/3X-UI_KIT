@@ -45,6 +45,19 @@ class Http(unittest.TestCase):
         self.assertIn("Connection: close", r)
         self.assertNotIn("<open>", r)
 
+    def test_garbage_request_line(self):
+        for req in (b"GARBAGE\r\n\r\n", b"GET\r\n\r\n", b"GET / HTTP/1.1 x\r\n\r\n", b"POST /\r\n\r\n"):
+            r = raw(req)
+            self.assertTrue(r.startswith("HTTP/1.1 400 Bad Request\r\n"), (req, r[:60]))
+            self.assertIn("\r\nServer: nginx\r\n", r)
+            self.assertIn("Connection: close", r)
+            self.assertIn("<center><h1>400 Bad Request</h1></center>", r)
+            self.assertNotIn("<open>", r)
+
+    def test_bad_version(self):
+        r = raw(b"GET / HTTP/9.9\r\n\r\n")
+        self.assertTrue(r.startswith("HTTP/1.1 505"), r[:40])
+
 
 if __name__ == "__main__":
     unittest.main()
