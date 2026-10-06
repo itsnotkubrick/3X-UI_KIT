@@ -8,7 +8,6 @@
 # REALITY, XHTTP, VLESS/VMess WS, Trojan gRPC, Shadowsocks 2022, Hysteria2, TUIC,
 # AmneziaWG (классика и 3.1) и MTProto (и WireGuard по запросу), включает единую подписку
 # с форматом под каждый клиент и настраивает ufw. Домены не нужны.
-# Каждый протокол проверен настоящими клиентами – см. tests/matrix.
 
 # Запуск через sh (dash) ломается на непонятной ошибке синтаксиса – подскажем сразу.
 [ -n "${BASH_VERSION:-}" ] || { echo "Запустите через bash, а не через sh." >&2; exit 1; }
