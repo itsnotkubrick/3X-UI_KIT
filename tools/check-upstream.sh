@@ -17,7 +17,6 @@ row() { # название закреплено последняя
 echo "Закреплённые версии и последние релизы (⬆ – есть новее, прочитайте список изменений и протестируйте):"
 row "3X-UI" "$(pinned scripts/3x-ui.sh XUI_VERSION)" "$(latest MHSanaei/3x-ui '^v[0-9]+\.[0-9]+\.[0-9]+$')"
 row "Xray-core" "$(pinned scripts/3x-ui.sh XRAY_CORE)" "$(latest XTLS/Xray-core '^v[0-9]+\.[0-9]+\.[0-9]+$')"
-hy=$(pinned scripts/hysteria2.sh HY_VERSION); row "Hysteria" "v$hy" "$(latest apernet/hysteria '^app/v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's#app/##')"
 zv=$(sed -n "s#.*zashboard/releases/download/\(v[0-9.]*\)/dist.zip.*#\1#p" tools/lib/mihomo.js | head -1)
 row "zashboard" "$zv" "$(latest Zephyruso/zashboard '^v[0-9]+\.[0-9]+\.[0-9]+$')"
 printf '  %-12s последняя %s\n' "Mihomo" "$(latest MetaCubeX/mihomo '^v[0-9]+\.[0-9]+\.[0-9]+$')"

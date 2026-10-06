@@ -279,4 +279,4 @@ x-ui
 
 ---
 
-[← На главную](../README.md) · [Дальше: 🚀 Hysteria2 →](hysteria2.md)
+[← На главную](../README.md)

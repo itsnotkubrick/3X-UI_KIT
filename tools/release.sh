@@ -63,13 +63,12 @@ got=$(curl -fsSL "https://raw.githubusercontent.com/MHSanaei/3x-ui/$kp/x-ui.sh" 
 [[ $shs == "$got" ]] || die "Сумма x-ui.sh $kp в kit.sh не совпадает с официальной: «$shs» вместо «$got»."
 ok "Панель $kp и ядро $kx в kit.sh совпадают с установщиком и официальными суммами"
 
-# Открытые ключи из kit и hy2 – одинаковые, и среди них есть ключ, которым подписываем.
+# В kit записан открытый ключ, которым подписываем.
 signers() { awk '/^KIT_SIGNERS=\(/ {on = 1; next} on && /^\)/ {exit} on && /^ *"/ {gsub(/^ *"|"$/, ""); print}' "$1"; }
 [[ -n $(signers scripts/kit.sh) ]] || die "В scripts/kit.sh пустой KIT_SIGNERS: впишите туда открытую часть ключа ($key.pub)."
-[[ $(signers scripts/kit.sh) == "$(signers scripts/hysteria2.sh)" ]] || die "KIT_SIGNERS в kit.sh и hysteria2.sh различаются."
 pub=$(ssh-keygen -y -f "$key" | awk '{print $1, $2}')
 signers scripts/kit.sh | awk '{print $1, $2}' | grep -qxF "$pub" || die "Ключа $key нет в KIT_SIGNERS – серверы не примут такую подпись."
-ok "Ключ подписи записан в kit и hy2"
+ok "Ключ подписи записан в kit"
 
 { echo "# 3X-UI KIT $v"; sha "${FILES[@]}"; } >SHA256SUMS
 rm -f SHA256SUMS.sig

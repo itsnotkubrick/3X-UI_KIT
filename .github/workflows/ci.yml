@@ -24,10 +24,6 @@ jobs:
           grep -q "^KIT_VERSION=\"$v\"" scripts/3x-ui.sh
           grep -q "^KIT_VERSION=\"$v\"" scripts/hysteria2.sh
           grep -q "^KIT_VERSION=\"$v\"" scripts/kit.sh
-      - name: Ключ подписи одинаковый в kit и hy2
-        run: |
-          signers() { awk '/^KIT_SIGNERS=\(/ {on = 1; next} on && /^\)/ {exit} on' "$1"; }
-          diff <(signers scripts/kit.sh) <(signers scripts/hysteria2.sh)
       - name: Подпись релиза совпадает с файлами
         run: |
           [ -f SHA256SUMS ] || { echo "SHA256SUMS нет – релиз ещё не подписан"; exit 0; }
