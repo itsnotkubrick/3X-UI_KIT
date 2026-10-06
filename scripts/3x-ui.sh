@@ -1697,13 +1697,36 @@ sub_links() {
 # Файл настроек из копии можно читать, только если в нём нет ничего, кроме
 # ИМЯ=значение без подстановок и команд, и все имена – из списка для этого файла.
 # Иначе чужой архив подменил бы переменные установщика или kit (RESULT, PATH, KIT_VERSION…).
+# Значение каждого имени – тоже по его формату: kit потом подставляет их в sed, nginx и ссылки.
+# Кавычки – только пустые (''): так printf %q пишет пустое значение, остальное у нас без кавычек.
 safe_env() { # файл имя...
-  local f=$1 n; shift
+  local f=$1 n re; shift
   [[ -r $f ]] || die "В копии нет файла ${f##*/}."
-  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=_-]*|'[^']*'))?$" "$f" \
+  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=_-]*|''))?$" "$f" \
     && die "Это не резервная копия 3X-UI KIT или она повреждена (файл ${f##*/}). Ничего не менял."
   while IFS= read -r n; do
     [[ " $* " == *" $n "* ]] || die "Это не резервная копия 3X-UI KIT или она повреждена (лишнее имя $n в ${f##*/}). Ничего не менял."
+    case $n in
+      BACKUP_KIT_VERSION) re='^[0-9]{1,3}(\.[0-9]{1,3}){1,3}$' ;;
+      BACKUP_HOST | HOST) re='^[A-Za-z0-9.:-]{1,253}$' ;;
+      LINK_HOST) re='^[A-Za-z0-9.:-]{0,253}$' ;;
+      BACKUP_SSL) re='^(ip|custom|none)$' ;;
+      BACKUP_DATE) re='^[0-9]{4}-[0-9]{2}-[0-9]{2}$' ;;
+      XUI_USERNAME | XUI_PASSWORD) re='^[A-Za-z0-9._:/@%+,=-]{1,128}$' ;;
+      XUI_PANEL_PORT | SUB_INTERNAL) re='^[0-9]{1,5}$' ;;
+      XUI_WEB_BASE_PATH) re='^/?[A-Za-z0-9_-]{1,64}/?$' ;;
+      XUI_ACCESS_URL) re='^(https?://[A-Za-z0-9._:-]{1,253}/[A-Za-z0-9_/-]{0,130})?$' ;;
+      XUI_API_TOKEN) re='^[A-Za-z0-9._+/=-]{0,200}$' ;;
+      XUI_DB_TYPE) re='^(sqlite|postgres)?$' ;;
+      PANEL_ON) re='^(ip|domain)?$' ;;
+      SUB_BASE) re='^https?://[A-Za-z0-9.:-]{1,253}(/[A-Za-z0-9_-]{1,64}){0,4}/?$' ;;
+      SUB_PATH) re='^/[A-Za-z0-9_-]{1,64}/$' ;;
+      SINGLE) re='^(yes|no)?$' ;;
+      MTPROTO_INNER) re='^[0-9]{0,5}$' ;;
+      *) die "Это не резервная копия 3X-UI KIT или она повреждена (имя $n в ${f##*/}). Ничего не менял." ;;
+    esac
+    [[ $(env_get "$f" "$n") =~ $re ]] \
+      || die "Это не резервная копия 3X-UI KIT или она повреждена (значение $n в ${f##*/}). Ничего не менял."
   done < <(grep -oE '^[A-Z][A-Z0-9_]*' "$f")
   return 0
 }
@@ -1929,7 +1952,6 @@ PY
     SINGLE=$(env_get "$tmp/etc/kit/kit.env" SINGLE); SINGLE=${SINGLE:-no}
     SUB_PATH=$(env_get "$tmp/etc/kit/kit.env" SUB_PATH)
     LINK_HOST=$(env_get "$tmp/etc/kit/kit.env" LINK_HOST)
-    [[ $LINK_HOST =~ ^[A-Za-z0-9.:-]*$ ]] || LINK_HOST=""
     SUB_INTERNAL=$(env_get "$tmp/etc/kit/kit.env" SUB_INTERNAL)
     # kit потом подключает этот файл от root: адрес в нём должен быть тем же, что в копии.
     [[ $SINGLE =~ ^(yes|no)$ && $SUB_PATH =~ ^/[A-Za-z0-9_-]+/$ && $SUB_INTERNAL =~ ^[0-9]{1,5}$ \

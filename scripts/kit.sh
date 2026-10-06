@@ -158,7 +158,9 @@ collect_links() {
     grep -q '://' <<<"$raw" || raw=$(base64 -d <<<"$raw" 2>/dev/null || true)
     out+=$(grep -E "$filter" <<<"$raw" || true)$'\n'
   done
-  [[ ${SINGLE:-no} == yes ]] && out=$(sed "s/^\(tg:\/\/proxy?\)\(.*\)port=${MTPROTO_INNER:-10445}/\1\2port=443/" <<<"$out")
+  # Порт попадает в выражение sed – только если это число.
+  local inner=${MTPROTO_INNER:-10445}
+  [[ ${SINGLE:-no} == yes && $inner =~ ^[0-9]{1,5}$ ]] && out=$(sed "s/^\(tg:\/\/proxy?\)\(.*\)port=$inner/\1\2port=443/" <<<"$out")
   grep . <<<"$out" || true
 }
 
