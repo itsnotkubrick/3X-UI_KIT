@@ -18,6 +18,10 @@ jobs:
         run: python3 -m py_compile scripts/kit-sub.py
       - name: Генераторы
         run: node --test tools/test/*.test.js
+      - name: Проверка копии для --restore (GNU grep и bash)
+        run: |
+          python3 tools/test/restore_env_test.py
+          python3 tools/test/restore_archive_test.py
       - name: Версия в скриптах совпадает с VERSION
         run: |
           v=$(cat VERSION)
