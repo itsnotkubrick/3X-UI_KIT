@@ -2546,6 +2546,7 @@ menu_main() {
       "7. Резервная копия" "8. Версии" "" "9. Панель 3X-UI (меню x-ui)" "0. Выход"
     echo
     menu_status
+    update_hint
     echo
     ask_num "Выбор [0-9]: "; c=$REPLY
     case $c in
@@ -2582,7 +2583,7 @@ EOF
 cmd_key="${1:-} ${2:-}"; cmd_key=${cmd_key,,}; cmd_key=${cmd_key/users /user }
 case "$cmd_key" in
   " ") if [[ -t 0 && -t 1 ]]; then menu_main; else usage; fi ;;
-  "user add") shift 2; cmd_add "$@" ;;
+  "user add") shift 2; cmd_add "$@"; update_hint ;;
   "user list") cmd_list; update_hint ;;
   "user link") shift 2; cmd_link "$@" ;;
   "user limit") shift 2; cmd_limit "$@" ;;
@@ -2591,6 +2592,7 @@ case "$cmd_key" in
   "user del") shift 2; cmd_del "$@" ;;
   "user enforce") shift 2; cmd_enforce "$@" ;;
   "user vision") shift 2; cmd_vision "$@" ;;
+  "net ") shift; cmd_net; update_hint ;;
   "net "*) shift; cmd_net "$@" ;;
   "sni rotate") shift 2; sni_rotate "$@" ;;
   "sni "*) [[ -z ${2:-} ]] || die "Команда: kit net site"; sni_show ;;
