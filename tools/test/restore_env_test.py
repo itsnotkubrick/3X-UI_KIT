@@ -124,5 +124,31 @@ class SafeEnv(unittest.TestCase):
             self.rejected("kit-backup.env", GOOD["kit-backup.env"] + bad + "\n")
 
 
+kit_src = open(os.path.join(root, "scripts", "kit.sh"), encoding="utf-8").read()
+PANEL_PATH = re.search(r"^panel_web_path\(\) \{.*?^\}\n", kit_src, re.S | re.M).group(0)
+
+
+class NginxPaths(unittest.TestCase):
+    """Путь панели и подписки перед сборкой nginx (kit.sh panel_web_path, 3x-ui.sh setup_nginx)."""
+
+    def path(self, base, sub="/AbC123/"):
+        r = subprocess.run(["bash", "-c", PANEL_PATH + 'XUI_WEB_BASE_PATH=$1 SUB_PATH=$2\npanel_web_path || echo NO', "t", base, sub],
+                           capture_output=True, text=True)
+        return r.stdout.strip()
+
+    def test_good(self):
+        self.assertEqual(self.path("AbCdEf123456789012"), "/AbCdEf123456789012/")
+        self.assertEqual(self.path("/AbC_d-1/"), "/AbC_d-1/")
+
+    def test_bad(self):
+        for bad in ("x/ { return 200; } location /zz", "", "/", "a/b", "a;b", "a\nb", "$(id)", "a" * 65):
+            self.assertEqual(self.path(bad), "NO", bad)
+        for bad in ("/a b/", "/a/ { }", "", "/../"):
+            self.assertEqual(self.path("AbC", bad), "NO", bad)
+
+    def test_setup_nginx_checks(self):
+        self.assertIn('[[ $XUI_WEB_BASE_PATH =~ ^/?[A-Za-z0-9_-]{1,64}/?$ && $SUB_PATH =~ ^/[A-Za-z0-9_-]{1,64}/$ ]]', src)
+
+
 if __name__ == "__main__":
     unittest.main()

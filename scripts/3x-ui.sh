@@ -1464,6 +1464,9 @@ setup_nginx() {
       elif $st.network == "grpc" then ["grpc", $st.grpcSettings.serviceName, .port]
       else empty end | @tsv' <<<"$list")
 
+  # Пути панели (из install-result.env, при --restore – из копии) и подписки попадают в конфиг nginx.
+  [[ $XUI_WEB_BASE_PATH =~ ^/?[A-Za-z0-9_-]{1,64}/?$ && $SUB_PATH =~ ^/[A-Za-z0-9_-]{1,64}/$ ]] \
+    || die "Странный путь панели или подписки ($XUI_ENV) – не собираю nginx."
   local panel_path=/${XUI_WEB_BASE_PATH#/}
   panel_path=${panel_path%/}/
   {

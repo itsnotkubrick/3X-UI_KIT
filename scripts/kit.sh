@@ -2096,6 +2096,13 @@ sys.stdout.write(text[:steal[0]] + new + text[steal[1]:])
 PY
 }
 
+# Путь панели (install-result.env) и подписки (kit.env) идут в конфиг nginx: только буквы, цифры, _ и -.
+panel_web_path() {
+  [[ ${XUI_WEB_BASE_PATH:-} =~ ^/?[A-Za-z0-9_-]{1,64}/?$ && ${SUB_PATH:-} =~ ^/[A-Za-z0-9_-]{1,64}/$ ]] || return 1
+  local p=/${XUI_WEB_BASE_PATH#/}
+  echo "${p%/}/"
+}
+
 kit_env_set() { # ключ значение: меняет или добавляет строку в /etc/kit/kit.env
   python3 - "$KIT_ENV" "$1" "$2" <<'PY'
 import re, shlex, sys
@@ -2130,8 +2137,7 @@ sub_extra_sync() {
     tmp=$(mktemp); bak=$(mktemp); cp -p "$PANEL_CONF" "$bak"
     if panel_conf_py addloc "$PANEL_CONF" "$SUB_PATH" "${ex[@]}" >"$tmp" && [[ -s $tmp ]]; then
       cat "$tmp" >"$PANEL_CONF"
-      if [[ ${PANEL_ON:-ip} == domain ]]; then
-        panel_path=/${XUI_WEB_BASE_PATH#/}; panel_path=${panel_path%/}/
+      if [[ ${PANEL_ON:-ip} == domain ]] && panel_path=$(panel_web_path); then
         panel_conf_py render "$PANEL_CONF" domain "$SUB_PATH" "$panel_path" "${ex[@]}" >"$tmp" && [[ -s $tmp ]] && cat "$tmp" >"$PANEL_CONF"
       fi
       if nginx -t >/dev/null 2>&1; then systemctl reload nginx
@@ -2155,7 +2161,7 @@ net_panel() { # [domain|ip]
   fi
   [[ $want == domain || $want == ip ]] || die "kit net panel [domain|ip]"
   [[ $want != "$cur" ]] || { say "Уже так: панель и подписка по $([[ $want == domain ]] && echo "домену $domain" || echo "IP")."; return 0; }
-  panel_path=/${XUI_WEB_BASE_PATH#/}; panel_path=${panel_path%/}/
+  panel_path=$(panel_web_path) || die "Странный путь панели или подписки в $XUI_ENV или $KIT_ENV – не трогаю nginx."
   if [[ $want == domain ]]; then
     getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | grep -qx "$(host_ip)" || die "Домен $domain не указывает на этот сервер ($(host_ip)). Исправьте A-запись и повторите."
     [[ -s $cert && -s $key ]] || die "Нет сертификата домена ($cert) – не трогаю nginx."
