@@ -91,6 +91,42 @@ def fix_userinfo(value):
     return "; ".join(parts)
 
 
+JSON_FIX_MAX = 2 * 1024 * 1024
+
+
+def fix_vless_encryption(body):
+    """JSON-подписка панели: у vless-пользователя без encryption (нет поля или пусто) ставим "none" – Xray иначе
+    не принимает конфиг. Две формы: vnext[].users[] и плоская (settings.id/encryption). Непустое значение
+    (например, mlkem) не трогаем. Не разобралось, слишком большое или менять нечего – тело как пришло."""
+    if len(body) > JSON_FIX_MAX:
+        return body
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        log("JSON-подписка: тело не разобралось, отдаю как есть")
+        return body
+    changed = False
+
+    def fix(user):
+        nonlocal changed
+        if isinstance(user, dict) and (user.get("encryption") is None or user.get("encryption") == ""):
+            user["encryption"] = "none"
+            changed = True
+
+    for cfg in (data if isinstance(data, list) else [data]):
+        outs = cfg.get("outbounds") if isinstance(cfg, dict) else None
+        for o in outs if isinstance(outs, list) else []:
+            st = o.get("settings") if isinstance(o, dict) and o.get("protocol") == "vless" else None
+            if not isinstance(st, dict):
+                continue
+            for v in st.get("vnext") if isinstance(st.get("vnext"), list) else []:
+                for u in v.get("users") if isinstance(v, dict) and isinstance(v.get("users"), list) else []:
+                    fix(u)
+            if "id" in st:
+                fix(st)
+    return json.dumps(data, ensure_ascii=False).encode() if changed else body
+
+
 def strip_links(body):
     """Список ссылок (base64 или текст) без vpn:// и tg:// – их не умеет ни одно VPN-приложение
     со ссылками: vpn:// – конфиг для AmneziaVPN, tg:// – прокси для Telegram."""
@@ -383,6 +419,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     body = merge_awg(body, abody)
             elif code == 200 and "text/plain" in headers.get("content-type", ""):
                 body = strip_links(body)
+            elif code == 200 and "json" in headers.get("content-type", ""):
+                body = fix_vless_encryption(body)
             if code == 200 and clash and CONF.get("auto", True):
                 body = add_auto(body)
             if code == 200 and clash and CONF.get("dns", True):
