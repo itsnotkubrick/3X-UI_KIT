@@ -73,5 +73,28 @@ class Stub(unittest.TestCase):
         self.assertLess(ends.count(top), N * 0.08, (top, ends.count(top)))
 
 
+class SamePage(unittest.TestCase):
+    """Hysteria2 (masquerade) отдаёт заглушку байт в байт как nginx – с последним переводом строки."""
+
+    def read(self, line, var):
+        import tempfile
+        d = tempfile.mkdtemp()
+        f = os.path.join(d, "index.html")
+        with open(f, "wb") as fh:
+            fh.write(b"<html>\n<p>x</p>\n\n")
+        line = line.replace("/var/www/kit/index.html", f)
+        r = subprocess.run(["bash", "-c", line + '\nprintf %s "$' + var + '"'], capture_output=True)
+        return r.stdout
+
+    def test_installer(self):
+        line = re.search(r"^  STUB_HTML=\$\(cat /var/www/kit/index\.html.*$", src, re.M).group(0)
+        self.assertEqual(self.read(line, "STUB_HTML"), b"<html>\n<p>x</p>\n\n")
+
+    def test_kit_masq(self):
+        kit = open(os.path.join(root, "scripts", "kit.sh"), encoding="utf-8").read()
+        line = re.search(r"^    page=\$\(cat /var/www/kit/index\.html.*$", kit, re.M).group(0)
+        self.assertEqual(self.read(line, "page"), b"<html>\n<p>x</p>\n\n")
+
+
 if __name__ == "__main__":
     unittest.main()

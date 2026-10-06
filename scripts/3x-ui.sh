@@ -691,7 +691,8 @@ main() {
   install -d -m 755 /var/www/kit
   [[ -s /var/www/kit/index.html ]] || stub_site >/var/www/kit/index.html
   chmod 644 /var/www/kit/index.html
-  STUB_HTML=$(cat /var/www/kit/index.html)
+  # Байт в байт как у nginx: $(…) срезал бы последний перевод строки, и длина ответа Hysteria2 отличалась бы.
+  STUB_HTML=$(cat /var/www/kit/index.html; printf x); STUB_HTML=${STUB_HTML%x}
   local p
   for p in "${PROTOS[@]}"; do "proto_$p"; done
   # Первый пользователь – сразу на всех протоколах (как «kit user add»).
@@ -1413,7 +1414,7 @@ setup_nginx() {
   fi
 
   install -d -m 755 /var/www/kit
-  [[ -f /var/www/kit/index.html ]] || { if [[ -n ${STUB_HTML:-} ]]; then printf '%s\n' "$STUB_HTML"; else stub_site; fi; } >/var/www/kit/index.html
+  [[ -f /var/www/kit/index.html ]] || { if [[ -n ${STUB_HTML:-} ]]; then printf '%s' "$STUB_HTML"; else stub_site; fi; } >/var/www/kit/index.html
 
   # Маршруты – из текущих подключений панели: сайты REALITY, пути WebSocket, сервисы gRPC.
   local list reality_sni xhttp_sni mt_sni steal_domain locs="" kind path port
