@@ -119,6 +119,38 @@ class SafeEnv(unittest.TestCase):
         for bad in ("RESULT=/etc/cron.d/x", "XUI_PIN=v0", "BACKUP_HOST=1.2.3.4"):
             self.rejected("kit.env", GOOD["kit.env"] + bad + "\n")
 
+    def test_binary_bytes(self):
+        # Аудит 1.2 (N6): с нулевым байтом GNU grep без -a считал файл двоичным и молчал – проверка «проходила»,
+        # а bash при «.» выкидывает нулевые байты и выполняет остальное. Лишнее имя PATH плюс один байт в каждом месте.
+        for name, text in GOOD.items():
+            body = text.encode()
+            first = body.index(b"\n") + 1
+            for bad in (b"\0", b"\r", b"\x1b", b"\x80", b"\xff"):
+                for variant in (bad + body,                                   # в начале
+                                body[:first] + bad + b"\n" + body[first:],    # отдельной строкой
+                                body[:5] + bad + body[5:],                    # в середине имени или в начале значения
+                                body.replace(b"1.2.3.4", b"1.2" + bad + b".3.4", 1),  # в середине значения
+                                body + b"PATH=/tmp/x" + bad + b"\n",          # в значении лишнего имени
+                                body + b"PATH=/tmp/x\n" + bad,                # в конце, без перевода строки
+                                body + b"PATH=/tmp/x\n" + bad + b"\n"):       # в конце, одиночный
+                    self.rejected_bytes(name, variant)
+            # Без лишнего имени, только байт – тоже отказ.
+            self.rejected_bytes(name, body + b"\0\n")
+            self.rejected_bytes(name, body.replace(b"\n", b"\r\n"))
+
+    def rejected_bytes(self, name, data):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, name)
+        with open(p, "wb") as fh:
+            fh.write(data)
+        script = ('set -Eeuo pipefail\ndie() { echo "DIE: $*"; exit 1; }\n' + funcs
+                  + 'safe_env "$1" ' + " ".join(NAMES[name]) + '\necho OK\n')
+        r = subprocess.run(["bash", "-c", script, "t", p], capture_output=True)
+        out = (r.stdout + r.stderr).decode("utf-8", "replace")
+        self.assertNotEqual(r.returncode, 0, "%s %r: %s" % (name, data, out))
+        self.assertIn("Это не резервная копия 3X-UI KIT", out, "%s %r" % (name, data))
+        self.assertNotIn("\nOK\n", "\n" + out)
+
     def test_substitutions(self):
         for bad in ("BACKUP_DATE=$(id)", "BACKUP_DATE=`id`", 'BACKUP_DATE="$HOME"', "export BACKUP_DATE=1", "BACKUP_DATE=1; id", " BACKUP_DATE=1"):
             self.rejected("kit-backup.env", GOOD["kit-backup.env"] + bad + "\n")

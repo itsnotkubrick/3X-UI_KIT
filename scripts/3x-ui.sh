@@ -1703,10 +1703,14 @@ sub_links() {
 # Иначе чужой архив подменил бы переменные установщика или kit (RESULT, PATH, KIT_VERSION…).
 # Значение каждого имени – тоже по его формату: kit потом подставляет их в sed, nginx и ссылки.
 # Кавычки – только пустые (''): так printf %q пишет пустое значение, остальное у нас без кавычек.
+# Сначала – только печатные ASCII и перевод строки: файл с нулевым байтом GNU grep считает двоичным и молчит
+# (проверка «прошла» бы), а bash при «.» нулевые байты выкидывает и выполняет остальное. Поэтому и grep -a.
 safe_env() { # файл имя...
   local f=$1 n re; shift
   [[ -r $f ]] || die "В копии нет файла ${f##*/}."
-  grep -qvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=_-]*|''))?$" "$f" \
+  [[ $(LC_ALL=C tr -d '\n -~' <"$f" | wc -c) -eq 0 ]] \
+    || die "Это не резервная копия 3X-UI KIT или она повреждена (файл ${f##*/}). Ничего не менял."
+  LC_ALL=C grep -aqvE "^([A-Z][A-Z0-9_]*=([A-Za-z0-9._:/@%+,=_-]*|''))?$" "$f" \
     && die "Это не резервная копия 3X-UI KIT или она повреждена (файл ${f##*/}). Ничего не менял."
   while IFS= read -r n; do
     [[ " $* " == *" $n "* ]] || die "Это не резервная копия 3X-UI KIT или она повреждена (лишнее имя $n в ${f##*/}). Ничего не менял."
@@ -1731,7 +1735,7 @@ safe_env() { # файл имя...
     esac
     [[ $(env_get "$f" "$n") =~ $re ]] \
       || die "Это не резервная копия 3X-UI KIT или она повреждена (значение $n в ${f##*/}). Ничего не менял."
-  done < <(grep -oE '^[A-Z][A-Z0-9_]*' "$f")
+  done < <(LC_ALL=C grep -aoE '^[A-Z][A-Z0-9_]*' "$f")
   return 0
 }
 
@@ -1888,6 +1892,24 @@ with tarfile.open(sys.argv[1], "r:gz") as t:
     for need in ("etc/x-ui/x-ui.db", "etc/x-ui/install-result.env", "kit-backup.env"):
         if need not in names:
             sys.exit("нет " + need)
+    # Файлы настроек потом подключаются от root: в них только печатные ASCII и перевод строки. Нулевой байт,
+    # \r или не-ASCII ломают построчную проверку (GNU grep считает такой файл двоичным). Данные для входа
+    # (3x-ui.txt) показываются в терминале: только UTF-8 без управляющих символов, кроме \n и \t.
+    for m in ms:
+        if not m.isfile():
+            continue
+        if m.name in ("etc/x-ui/install-result.env", "etc/kit/kit.env", "kit-backup.env"):
+            data = t.extractfile(m).read(65537)
+            if len(data) > 65536 or data.translate(None, bytes(range(0x20, 0x7f)) + b"\n"):
+                sys.exit("байты " + m.name)
+        elif m.name == "root/3x-ui.txt":
+            data = t.extractfile(m).read(1048577)
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                sys.exit("байты " + m.name)
+            if len(data) > 1048576 or any((c < " " and c not in "\n\t") or "\x7f" <= c <= "\x9f" for c in text):
+                sys.exit("байты " + m.name)
     # Каталог сертификата есть – в нём оба файла, иначе установка споткнётся на полпути.
     files = {m.name for m in ms if m.isfile() and m.size > 0}
     for c in ("root/cert/self", "root/cert/custom"):
@@ -2023,7 +2045,7 @@ PY
   if [[ -f /etc/kit/kit.env ]]; then
     install_kit_file
     # Панель по домену: nginx собран заново, значит блок домена нужно вернуть (домен должен указывать на этот сервер).
-    if grep -q '^PANEL_ON=domain' /etc/kit/kit.env; then
+    if grep -aq '^PANEL_ON=domain' /etc/kit/kit.env; then
       sed -i 's/^PANEL_ON=.*/PANEL_ON=ip/' /etc/kit/kit.env
       /usr/local/bin/kit net panel domain >/dev/null 2>&1 || { /usr/local/bin/kit __xver 0 >/dev/null 2>&1 || true; warn "Панель по домену не включилась (домен должен указывать на этот сервер): kit net panel domain"; }
     fi

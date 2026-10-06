@@ -123,6 +123,38 @@ class RestoreEnv(unittest.TestCase):
         for v in (b"XUI_WEB_BASE_PATH='x/ { return 200; } location /zz'", b"XUI_WEB_BASE_PATH=x/../y", b"XUI_WEB_BASE_PATH=$(id)"):
             self.bad({"etc/x-ui/install-result.env": ENVS["etc/x-ui/install-result.env"].replace(b"XUI_WEB_BASE_PATH=AbCdEf123456789012", v)})
 
+    def test_binary_bytes_every_file(self):
+        # Аудит 1.2 (N6): нулевой байт и прочее непечатное в файлах настроек отклоняет уже проверка архива.
+        for name, body in ENVS.items():
+            first = body.index(b"\n") + 1
+            for bad in (b"\0", b"\r", b"\x1b", b"\x80", b"\xff", b"\t", b"\x7f"):
+                for variant in (bad + body, body[:first] + bad + b"\n" + body[first:],
+                                body.replace(b"1.2.3.4", b"1.2" + bad + b".3.4", 1), body + b"PATH=/tmp/x" + bad + b"\n",
+                                body + b"PATH=/tmp/x\n" + bad, body + bad + b"\n"):
+                    r = check(archive([(k, v) for k, v in dict(ENVS, **{name: variant}).items()]))
+                    self.assertNotEqual(r.returncode, 0, "%s %r" % (name, variant))
+                    self.assertIn("байты " + name, r.stderr)
+            # Слишком большой файл (одна длинная строка) – тоже отказ.
+            r = check(archive([(k, v) for k, v in dict(ENVS, **{name: body + b"X" * 70000 + b"\n"}).items()]))
+            self.assertIn("байты " + name, r.stderr)
+            # Тот же файл в архиве дважды (tar распакует последний) – проверяются оба.
+            p = archive([(k, v) for k, v in ENVS.items()])
+            with tarfile.open(p, "r:gz") as t:
+                ms = [(m, t.extractfile(m).read()) for m in t.getmembers()]
+            with tarfile.open(p, "w:gz") as t:
+                for m, data in ms + [(tarfile.TarInfo(name), body + b"\0")]:
+                    m.size = len(data)
+                    t.addfile(m, io.BytesIO(data))
+            self.assertIn("байты " + name, check(p).stderr)
+
+    def test_3xui_txt(self):
+        good = "3X-UI KIT – данные для входа\n\nПанель:  https://1.2.3.4/x/\n\tvless://a@1.2.3.4:443?x=1#Мой 🙂\n".encode()
+        r = check(archive([(k, v) for k, v in ENVS.items()] + [("root/3x-ui.txt", good)]))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for bad in (b"\0", b"\x1b]0;x\x07", b"\x1b[2J", b"\r", b"\xff", b"\xc2\x9b", b"\x7f"):
+            r = check(archive([(k, v) for k, v in ENVS.items()] + [("root/3x-ui.txt", good + bad + b"\n")]))
+            self.assertIn("байты root/3x-ui.txt", r.stderr, repr(bad))
+
     def test_values_every_file(self):
         for name in ENVS:
             for line in ENVS[name].splitlines():

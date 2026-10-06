@@ -61,7 +61,7 @@ if [[ $API_OK == no && -x /usr/local/x-ui/x-ui ]]; then
     done
     if [[ $API_OK == yes ]]; then
       XUI_API_TOKEN=$new_token
-      env_tmp=$(mktemp); { grep -v '^XUI_API_TOKEN=' "$XUI_ENV" || true; printf 'XUI_API_TOKEN=%q\n' "$new_token"; } >"$env_tmp"
+      env_tmp=$(mktemp); { grep -av '^XUI_API_TOKEN=' "$XUI_ENV" || true; printf 'XUI_API_TOKEN=%q\n' "$new_token"; } >"$env_tmp"
       install -m 600 "$env_tmp" "$XUI_ENV"; rm -f "$env_tmp"
       warn "Токен API панели в $XUI_ENV не подошёл – выпустил новый и сохранил (старый остаётся в панели, его можно отозвать: Настройки – API-токены)."
     fi
