@@ -158,7 +158,7 @@ kit backup                   # не помогло – копия, затем п
 **3.** вставить команду из генератора.
 
 > [!NOTE]
-> На роутере работает [XKeen](https://github.com/jameszeroX/XKeen) автора jameszeroX, спасибо ему. Вопросы по самой программе – в [её репозиторий](https://github.com/jameszeroX/XKeen/issues), по моей инструкции и генератору – мне.
+> На роутере работает [XKeen](https://github.com/jameszeroX/XKeen) автора jameszeroX, спасибо ему.
 
 <details>
 <summary><b>📶 Keenetic: XKeen (jameszeroX) · 8 шагов, 20–30 минут</b></summary>
