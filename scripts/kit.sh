@@ -50,6 +50,24 @@ for scheme in https http; do
   API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
   if curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $XUI_API_TOKEN" "$API/server/getNewUUID" 2>/dev/null; then API_OK=yes; break; fi
 done
+if [[ $API_OK == no && -x /usr/local/x-ui/x-ui ]]; then
+  # Токен из файла не подошёл (после обновления с 1.0, смены токена, переустановки панели). Токены хранятся хэшами, прочитать
+  # нельзя, но команда панели выпускает отдельный токен «cli-fallback», не трогая остальные: берём его и сохраняем в файл.
+  new_token=$(/usr/local/x-ui/x-ui setting -getApiToken 2>/dev/null | sed -n 's/^apiToken: *//p' | tail -1 | tr -d '[:space:]' || true)
+  if [[ $new_token =~ ^[A-Za-z0-9_-]{16,128}$ ]]; then
+    for scheme in https http; do
+      API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
+      if curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $new_token" "$API/server/getNewUUID" 2>/dev/null; then API_OK=yes; break; fi
+    done
+    if [[ $API_OK == yes ]]; then
+      XUI_API_TOKEN=$new_token
+      env_tmp=$(mktemp); { grep -v '^XUI_API_TOKEN=' "$XUI_ENV" || true; printf 'XUI_API_TOKEN=%q\n' "$new_token"; } >"$env_tmp"
+      install -m 600 "$env_tmp" "$XUI_ENV"; rm -f "$env_tmp"
+      warn "Токен API панели в $XUI_ENV не подошёл – выпустил новый и сохранил (старый остаётся в панели, его можно отозвать: Настройки – API-токены)."
+    fi
+  fi
+  unset new_token env_tmp
+fi
 if [[ $API_OK == no ]]; then
   # Токен не подошёл ни по https, ни по http. Схему выбираем по тому, говорит ли порт панели по TLS:
   # иначе запрос по http к TLS-порту даёт невнятное «Unsupported HTTP version in response».
