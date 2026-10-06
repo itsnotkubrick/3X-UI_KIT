@@ -338,7 +338,11 @@ def apply_rules(clash_yaml, loaded):
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "nginx"
     sys_version = ""
+    protocol_version = "HTTP/1.1"  # как у nginx; ответы всегда с Content-Length
     timeout = 20  # зависшие соединения не держим
+
+    def version_string(self):  # «Server: nginx» без хвостового пробела
+        return self.server_version
 
     def setup(self):
         # TLS-рукопожатие – в потоке запроса, а не в общем цикле приёма соединений.
@@ -378,11 +382,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
     def do_other(self):
+        # Тело запроса не читаем – значит, и соединение дальше не держим.
+        self.close_connection = True
         self.send_html_error(404)
 
     do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_other
