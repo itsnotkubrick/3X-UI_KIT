@@ -1746,14 +1746,14 @@ net_dns() { # [on|off]
 
 # ---------- раздельная маршрутизация в подписке ----------
 # Необязательно: /etc/kit-sub/rules.yaml. Через VPN идёт только перечисленное, остальное (в том числе местные приложения)
-# напрямую. Работает для приложений на Mihomo (Clash Verge, FlClash, Mihomo Party), Karing и Hiddify (конфиг sing-box): правила приезжают с подпиской, на телефонах
+# напрямую. Работает для приложений на Mihomo (Clash Verge, FlClash, Mihomo Party): правила приезжают с подпиской, на телефонах
 # ничего настраивать не нужно. DNS при этом не течёт: имена из списка у клиента не разрешаются, а запросы про них идут по DoH
 # через VPN (подробности – в kit-sub.py). Нет файла – подписка как обычно, весь трафик через VPN.
 SPLIT_FILE=/etc/kit-sub/rules.yaml
 
 split_template() {
   cat <<'YAML'
-# Раздельная маршрутизация подписки (приложения на Mihomo: Clash Verge, FlClash, Mihomo Party; Karing и Hiddify).
+# Раздельная маршрутизация подписки (приложения на Mihomo: Clash Verge, FlClash, Mihomo Party).
 # Через VPN идёт ТОЛЬКО перечисленное ниже (сервисы, которым VPN нужен), всё остальное – напрямую.
 # Правка вступает в силу, когда приложение обновит подписку; перезапуск не нужен.
 # Проверить файл: kit net split check. Выключить: kit net split off.
@@ -1890,7 +1890,7 @@ net_split() { # [on|off|check]
         n=$(python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules 2>&1 | grep -a '^Правил через VPN' || true)
         echo "Раздельная маршрутизация включена: $n"
         echo "Файл: $SPLIT_FILE (править, проверить: kit net split check, выключить: kit net split off)"
-        echo "Mihomo-приложения, Karing и Hiddify берут список из подписки сами; Happ и JSON-подписка Xray – из панели (после правки файла: kit net split apply)."
+        echo "Mihomo-приложения берут список из подписки сами; Happ и JSON-подписка Xray – из панели (после правки файла: kit net split apply)."
       else
         echo "Раздельная маршрутизация выключена: через VPN идёт весь трафик. Включить: kit net split on"
       fi ;;
@@ -1913,7 +1913,7 @@ net_split() { # [on|off|check]
       [[ -f $SPLIT_FILE ]] || die "Файла нет: $SPLIT_FILE (включить: kit net split on)"
       python3 /usr/local/lib/kit-sub/kit_sub.py --check-rules && return 0
       case $? in
-        2) die "Исправьте список: с неизвестной категорией приложения на Mihomo, Karing и Hiddify не смогут запустить конфиг." ;;
+        2) die "Исправьте список: с неизвестной категорией приложения на Mihomo не смогут запустить конфиг." ;;
         *) die "Список не применится – подписка останется без раздельной маршрутизации." ;;
       esac ;;
     apply)
