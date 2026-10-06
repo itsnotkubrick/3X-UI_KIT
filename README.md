@@ -15,11 +15,11 @@
 ---
 
 > [!TIP]
-> **Вышла версия 1.1.2:** исправление установки на чистом сервере и мелкие починки.
-> [Что нового](https://github.com/itsnotkubrick/3X-UI_KIT/releases/tag/v1.1.2) ·
-> сервер на 1.1 и 1.1.1 обновится сам этой ночью, а на 1.0 одной командой:
+> **Вышла версия 1.2:** панель 3X-UI v3.9.0, меню `kit`, раздельная маршрутизация и `--restore`.
+> [Что нового](https://github.com/itsnotkubrick/3X-UI_KIT/releases/tag/v1.2) ·
+> сервер на 1.1.x обновится сам этой ночью, а на 1.0 одной командой:
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/v1.1.2/scripts/kit.sh -o /usr/local/bin/kit && chmod 755 /usr/local/bin/kit && kit update
+> curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/v1.2/scripts/kit.sh -o /usr/local/bin/kit && chmod 755 /usr/local/bin/kit && kit update
 > ```
 
 > [!NOTE]
