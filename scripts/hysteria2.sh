@@ -53,11 +53,6 @@ trap 'die "Ошибка в строке $LINENO. Если это установ�
 
 need_root() { [[ $EUID -eq 0 ]] || die "Запустите от root: sudo -i, затем команду ещё раз."; }
 
-# Прежнее имя файла настроек – переносим, чтобы старые установки не сломались.
-if [[ -f $CONF_DIR/pinkman.env && ! -f $STATE && -w $CONF_DIR ]]; then
-  mv "$CONF_DIR/pinkman.env" "$STATE"
-fi
-
 # ---------- проверки ----------
 
 check_os() {
