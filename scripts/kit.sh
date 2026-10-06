@@ -1708,7 +1708,8 @@ hy_masq() { # on|off
   [[ -n $id ]] || die "На сервере нет Hysteria2."
   if [[ $act == on ]]; then
     page=$(cat /var/www/kit/index.html 2>/dev/null || true)
-    [[ -n $page ]] || page='<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Cumulo Cloud</title></head><body style="font-family:sans-serif;text-align:center;margin-top:20vh"><h1>Cumulo Cloud</h1><p>Service status: all systems operational.</p></body></html>'
+    # Страницы нет только у старых установок с отдельными портами – тогда простая страница без названия.
+    [[ -n $page ]] || page='<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Welcome</title></head><body style="font-family:sans-serif;text-align:center;margin-top:20vh"><h1>Welcome</h1><p>This site is being updated. Please check back soon.</p></body></html>'
     inbound_patch "$id" '.streamSettings |= ((if type == "string" then fromjson else . end) | .hysteriaSettings.masquerade = {type: "string", content: $c, statusCode: 200, headers: {"content-type": "text/html; charset=utf-8"}})' --arg c "$page" \
       || die "Панель не приняла изменение. Ничего не изменилось."
     say "Hysteria2 теперь отвечает на посторонний HTTP/3-запрос страницей сайта."

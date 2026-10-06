@@ -687,7 +687,11 @@ main() {
     issue_domain_cert || die "Без сертификата для $DOMAIN продолжать нельзя. Исправьте причину и запустите скрипт снова."
     OPEN+=("80/tcp")
   fi
-  STUB_HTML=$(stub_site)
+  # Одна заглушка на сервер: её показывают nginx на 443 и Hysteria2 (masquerade), её же берёт kit net masq.
+  install -d -m 755 /var/www/kit
+  [[ -s /var/www/kit/index.html ]] || stub_site >/var/www/kit/index.html
+  chmod 644 /var/www/kit/index.html
+  STUB_HTML=$(cat /var/www/kit/index.html)
   local p
   for p in "${PROTOS[@]}"; do "proto_$p"; done
   # Первый пользователь – сразу на всех протоколах (как «kit user add»).
@@ -1308,51 +1312,88 @@ brand_xui_menu() {
 
 # ---------- всё на 443: nginx ----------
 
-# Сайт-заглушка: на случайный заход по 443 сервер показывает обычный сайт. Шаблон выбирается
-# случайно из набора, чтобы тысячи серверов 3X-UI KIT не выглядели одинаково. Всё внутри
-# скрипта, со сторонних сайтов ничего не скачивается.
+# Сайт-заглушка: на случайный заход по 443 сервер показывает обычный сайт. Страница собирается при
+# установке из случайных частей: тема (кафе, фотограф, блог, мастерская…), название, тексты, вёрстка,
+# цвета и шрифт. 20 тем × 5 вёрсток – 100 вариантов, а с названиями, адресами и палитрами страницы
+# разных серверов не совпадают. Всё внутри скрипта: без внешних шрифтов, скриптов и ссылок.
 stub_site() {
-  local n year
-  n=$(rnd 1 9); year=$(date +%Y)
-  case $n in
-    1) cat <<'HTML'
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Welcome</title><style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f7f9;color:#1f2328}main{text-align:center;padding:24px}h1{font-weight:600;font-size:28px}p{color:#57606a}</style></head><body><main><h1>Site is under construction</h1><p>Please check back soon.</p></main></body></html>
-HTML
-    ;;
-    2) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cumulo Developer Hub</title><style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f8fa;color:#1f2328}header{background:#0b3d5c;color:#fff;padding:40px 20px;text-align:center}h1{margin:0 0 6px;font-size:26px}p{margin:0;color:#b6d4e8}main{max-width:760px;margin:32px auto;padding:0 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}.c{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:18px}.c b{display:block;margin-bottom:6px}.c span{color:#656d76;font-size:14px}footer{text-align:center;color:#8c959f;font-size:13px;padding:24px}</style></head><body><header><h1>Cumulo Developer Hub</h1><p>Guides, SDKs and release notes</p></header><main><div class="c"><b>Documentation</b><span>Getting started, tutorials and API reference.</span></div><div class="c"><b>SDKs</b><span>Client libraries for Python, Go and JavaScript.</span></div><div class="c"><b>Release notes</b><span>What changed in the latest platform release.</span></div></main><footer>&copy; $year Cumulo Cloud</footer></body></html>
-HTML
-    ;;
-    3) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lena Hart Photography</title><style>body{margin:0;font-family:Georgia,serif;background:#111;color:#eee}header{padding:48px 24px 16px;text-align:center}h1{font-weight:400;letter-spacing:.2em;text-transform:uppercase;font-size:22px}p{color:#aaa}.g{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;padding:24px}.g div{aspect-ratio:4/3;background:linear-gradient(135deg,#2b2b2b,#444)}footer{text-align:center;color:#666;padding:24px;font-size:13px}</style></head><body><header><h1>Lena Hart</h1><p>Landscape &amp; travel photography</p></header><section class="g"><div></div><div></div><div></div><div></div><div></div><div></div></section><footer>&copy; $year Lena Hart. New portfolio coming soon.</footer></body></html>
-HTML
-    ;;
-    4) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Notes</title><style>body{max-width:640px;margin:0 auto;padding:40px 20px;font:16px/1.6 ui-monospace,Menlo,Consolas,monospace;color:#222;background:#fdfdf8}h1{font-size:20px}a{color:#0645ad}li{margin:6px 0}small{color:#888}</style></head><body><h1>~/notes</h1><p>Small notes about Linux, networks and home servers.</p><ul><li><a href="#">Setting up a home NAS with ZFS</a> <small>$year-03-14</small></li><li><a href="#">Notes on systemd timers</a> <small>$year-02-02</small></li><li><a href="#">Why I moved my blog to a static site</a> <small>$year-01-09</small></li></ul><p><small>Comments are closed.</small></p></body></html>
-HTML
-    ;;
-    5) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Green Bean Coffee</title><style>body{margin:0;font-family:Helvetica,Arial,sans-serif;background:#f4efe6;color:#3b2f24;text-align:center}main{padding:72px 20px}h1{font-size:40px;margin:0 0 8px}p{font-size:18px}.b{display:inline-block;margin-top:16px;padding:10px 22px;border:2px solid #3b2f24;border-radius:24px}small{display:block;margin-top:48px;color:#8a7a68}</style></head><body><main><h1>Green Bean Coffee</h1><p>Specialty coffee &middot; fresh pastries &middot; open daily 8&ndash;18</p><span class="b">Online orders coming soon</span><small>&copy; $year Green Bean Coffee</small></main></body></html>
-HTML
-    ;;
-    6) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Status</title><style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#fff;color:#24292f}main{max-width:560px;margin:64px auto;padding:0 20px}h1{font-size:22px}.r{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #eaeef2}.ok{color:#1a7f37}small{color:#8c959f}</style></head><body><main><h1>System status</h1><div class="r"><span>Website</span><span class="ok">Operational</span></div><div class="r"><span>API</span><span class="ok">Operational</span></div><div class="r"><span>Storage</span><span class="ok">Operational</span></div><p><small>Updated automatically &middot; $year</small></p></main></body></html>
-HTML
-    ;;
-    7) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cumulo Cloud Status</title><style>body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f8fa;color:#1f2328}header{background:#0b3d5c;color:#fff;padding:28px 20px}header div,main{max-width:720px;margin:0 auto}h1{font-size:20px;margin:0}.b{background:#dafbe1;color:#1a7f37;border:1px solid #aceebb;border-radius:6px;padding:12px 16px;margin:20px 0;font-weight:600}.r{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #d0d7de}.u{display:flex;gap:2px}.u i{width:5px;height:20px;background:#2da44e;border-radius:1px}.u i.w{background:#bf8700}small{color:#656d76}main{padding:0 20px 40px}</style></head><body><header><div><h1>Cumulo Cloud</h1><small style="color:#b6d4e8">Service status</small></div></header><main><div class="b">All systems operational</div><div class="r"><span>Compute (eu-north)</span><span class="u"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="w"></i><i></i><i></i><i></i><i></i></span></div><div class="r"><span>Object storage</span><span class="u"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div><div class="r"><span>Managed databases</span><span class="u"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div><div class="r"><span>API &amp; console</span><span class="u"><i></i><i></i><i></i><i class="w"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div><p><small>Past 12 days &middot; &copy; $year Cumulo Cloud</small></p></main></body></html>
-HTML
-    ;;
-    8) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cumulo Cloud API Reference</title><style>body{margin:0;font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#1f2328;display:flex;min-height:100vh}nav{width:220px;background:#0b3d5c;color:#cfe3f1;padding:24px 18px;box-sizing:border-box}nav b{color:#fff;display:block;margin-bottom:16px}nav p{margin:6px 0}main{flex:1;max-width:760px;padding:32px}h1{font-size:24px}code,pre{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f6f8fa;border-radius:6px}pre{padding:14px;overflow:auto;font-size:13px}code{padding:2px 5px}.m{display:inline-block;background:#ddf4ff;color:#0969da;font-weight:600;padding:1px 8px;border-radius:4px;font-size:13px}small{color:#656d76}@media(max-width:600px){nav{display:none}}</style></head><body><nav><b>Cumulo Cloud</b><p>Overview</p><p>Authentication</p><p>Instances</p><p>Volumes</p><p>Networks</p><p>Errors</p></nav><main><h1>Instances</h1><p>Create, list and delete compute instances. All requests use a bearer token in the <code>Authorization</code> header.</p><p><span class="m">GET</span> <code>/v2/instances</code></p><pre>curl https://api.example.com/v2/instances \
-  -H "Authorization: Bearer &lt;token&gt;"</pre><p><span class="m">POST</span> <code>/v2/instances</code></p><pre>{ "name": "web-1", "region": "eu-north", "size": "s-2vcpu-4gb" }</pre><p><small>API version 2 &middot; &copy; $year Cumulo Cloud</small></p></main></body></html>
-HTML
-    ;;
-    9) cat <<HTML
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in - Cumulo Cloud Console</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0b3d5c}form{background:#fff;width:320px;padding:32px;border-radius:10px;box-sizing:border-box}h1{font-size:20px;margin:0 0 4px}p{color:#656d76;margin:0 0 20px;font-size:14px}label{display:block;font-size:13px;margin:12px 0 4px}input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d0d7de;border-radius:6px;font-size:14px}button{width:100%;margin-top:20px;padding:10px;border:0;border-radius:6px;background:#0969da;color:#fff;font-size:14px;font-weight:600}small{display:block;text-align:center;color:#8c959f;margin-top:16px}</style></head><body><form onsubmit="return false"><h1>Cumulo Cloud</h1><p>Sign in to the console</p><label>Email</label><input type="email" autocomplete="off"><label>Password</label><input type="password" autocomplete="off"><button type="button">Sign in</button><small>&copy; $year Cumulo Cloud</small></form></body></html>
-HTML
-    ;;
+  stub_pick() { shift $(($(rnd 1 $#) - 1)); printf '%s' "$1"; }
+  local year kind sfx tags items foot name tag font rad bg fg ac mu cd addr copy h k j t mo yy
+  local -a ti tx opts idx mon
+  year=$(date +%Y)
+  # тип (b – название места, p – имя человека)|слова для названия|подзаголовки|пункты «заголовок~текст»|подпись
+  # вместо адреса (варианты через ^). В текстах нельзя символы | ^ ~ & < > и двойные кавычки.
+  IFS='|' read -r kind sfx tags items foot <<<"$(stub_pick \
+"b|Coffee^Café^Coffee House^Coffee Roasters|Small-batch coffee and slow mornings.^Freshly roasted beans, pastries and a quiet corner.^Good coffee, made without hurry.|Our beans~Single-origin lots, roasted in small batches every week.^Breakfast~Granola, toast and pastries from the bakery next door.^Brew bar~Filter, espresso and a seasonal drink of the month.^Take home~Whole beans and ground coffee in 250 g bags.^Hours~Weekdays from 8 to 6, weekends from 9 to 4." \
+"b|Bakery^Bakehouse^Bread Co.|Sourdough baked before sunrise.^Bread, buns and cakes from a wood-fired oven.^A neighbourhood bakery since the old days.|Daily bread~Rye, spelt and white sourdough, fresh every morning.^Pastries~Cinnamon buns, croissants and seasonal fruit tarts.^Cakes to order~Birthday and wedding cakes, ordered two days ahead.^Flour~We mill part of our grain on site.^Hours~Open daily from 7, until the bread runs out." \
+"p|Photography^Photo Studio^Photo|Portraits, weddings and quiet landscapes.^Natural light and honest moments.^Stories told in pictures.|Portraits~Relaxed sessions outdoors or in the studio.^Weddings~Full-day coverage with a printed album.^Landscapes~Limited prints from northern coasts and hills.^Prints~Archival paper, signed and numbered.^Booking~Sessions are booked about a month ahead." \
+"p|Notes^Journal^Field Notes|Small notes on things I learn.^Writing things down so I do not forget them.^Thoughts on books, tools and long walks.|Keeping a reading log~Two years of short notes on every book I finished.^Plain text everywhere~Why my notes live in simple files and folders.^A slower kitchen~Learning to bake bread on weekends.^Walking the coast~Notes from a week on foot along the shore.^On small habits~What stuck after a year of tiny changes.|Written slowly, updated now and then" \
+"b|Books^Bookshop^Book Room|New and second-hand books.^A small shop with a big back room.^Books, maps and a reading chair.|New arrivals~Fresh fiction, travel writing and essays every Friday.^Second-hand~We buy and sell used books in good condition.^Children~A corner full of picture books and stories.^Book club~We meet on the first Thursday of every month.^Orders~Anything in print, usually within a week." \
+"b|Bicycles^Bike Works^Cycle Shop|Repairs, parts and friendly advice.^Keeping the town on two wheels.^Bikes fixed while you drink a coffee.|Repairs~Brakes, gears and wheels, usually the same day.^Service~A full check-up before the season starts.^Second-hand bikes~Refurbished city and touring bikes.^Parts~Tyres, chains, lights and locks in stock.^Workshop~Monday to Saturday, no appointment needed." \
+"b|Flowers^Florist^Flower Studio|Seasonal flowers, arranged by hand.^Bouquets for every day and every occasion.^Fresh stems from local growers.|Bouquets~Hand-tied and wrapped in paper, ready to go.^Weddings~Flowers for the ceremony, tables and the bride.^Plants~Easy houseplants and pots for small flats.^Subscriptions~A fresh bouquet every week or every month.^Delivery~Same-day delivery across town." \
+"b|Yoga^Yoga Studio^Movement Studio|Slow classes for busy people.^Move, breathe and rest.^A calm room in the middle of town.|Morning flow~A gentle start to the day, all levels welcome.^Beginners~A four-week course covering the basics.^Stretch and rest~Evening classes to unwind after work.^Private sessions~One-to-one classes by appointment.^Timetable~Classes every day except Sunday." \
+"p|Translations^Language Services^Translation|English, German and Spanish translations.^Clear texts in another language.^Careful translation for people and small firms.|Documents~Certificates, letters and contracts.^Websites~Pages and product texts, adapted for readers.^Editing~Proofreading of texts written by non-native speakers.^Deadlines~Short texts are usually ready in two days.^Quote~Send the text and get a price within a day." \
+"b|Architects^Design Studio^Studio|Homes and small buildings.^Quiet buildings that age well.^Design for houses, shops and gardens.|Houses~New homes and careful renovations.^Interiors~Kitchens, built-in furniture and lighting.^Planning~Drawings and paperwork for permits.^Projects~A selection of recent work is available on request.^Visits~Meetings at the studio by appointment." \
+"b|Bookkeeping^Accounting^Tax Advisors|Bookkeeping for small businesses.^Numbers in order, every month.^Tax returns without the headache.|Bookkeeping~Monthly records, invoices and bank reconciliation.^Payroll~Salaries and reports for teams of up to fifty.^Tax returns~Yearly returns for companies and sole traders.^Advice~A short call before big decisions.^Office~Open on weekdays, meetings by appointment." \
+"b|Woodworks^Furniture^Joinery|Furniture made to last.^Solid wood, simple shapes.^Tables, shelves and cabinets made by hand.|Tables~Oak and ash dining tables made to size.^Shelves~Bookcases and wall shelves for awkward corners.^Repairs~Old chairs and cabinets brought back to life.^Materials~Wood from local sawmills, natural oils only.^Workshop~Visitors welcome on Saturdays." \
+"b|Guesthouse^Inn^Rooms|Six rooms and a big breakfast.^A quiet place to stay near the old town.^Simple rooms with a garden view.|Rooms~Double and twin rooms with private bathrooms.^Breakfast~Served from 8 to 10 in the garden room.^Location~Ten minutes on foot from the station.^Long stays~Lower rates for a week or more.^Booking~Write or call, we answer the same day." \
+"b|Language School^Learning Center^Language Studio|Small groups, real conversations.^Learn a language one evening at a time.^Courses for adults and teenagers.|Group courses~Six to eight students, twice a week.^Private lessons~Flexible times, in person or at home.^Exam preparation~Courses for common language exams.^Placement~A free short test to find your level.^Terms~New groups start every September and February." \
+"p|Illustration^Drawings^Studio|Illustration for books and packaging.^Ink, paper and a lot of coffee.^Drawings with a story behind them.|Books~Covers and inside pages for children and adults.^Packaging~Labels for tea, coffee and small brands.^Portraits~Drawn portraits from your photos.^Prints~A small shop of signed prints.^Commissions~Open for new work from next month." \
+"b|Ceramics^Pottery^Clay Studio|Handmade cups, bowls and plates.^Stoneware for everyday use.^A small pottery with an open door.|Tableware~Plates and bowls fired at high temperature.^Classes~Wheel classes for beginners on weekday evenings.^Commissions~Sets for cafés and restaurants.^Glazes~Mixed in the studio from simple recipes.^Studio shop~Open on Fridays and Saturdays." \
+"b|Gardens^Landscaping^Garden Design|Gardens planned for real life.^Green spaces that are easy to keep.^Design and care for small gardens.|Design~Plans and planting lists for new gardens.^Planting~Trees, hedges and borders put in by our team.^Care~Seasonal visits for pruning and tidying.^Courtyards~Ideas for small yards and balconies.^Consultation~A first visit with a short written plan." \
+"b|Music School^Piano Studio^Music Lessons|Lessons for all ages.^Piano, guitar and singing.^Learn to play the music you love.|Piano~Lessons for beginners and returning players.^Guitar~Acoustic and electric, chords to fingerstyle.^Singing~Voice lessons for choirs and solo work.^Concerts~Students play twice a year for family and friends.^Trial lesson~The first half hour is free." \
+"b|Docs^Handbook^Documentation|Guides and reference for the project.^Everything you need to get started.^Documentation for users and contributors.|Getting started~Install, set up and run your first project.^Configuration~All options with short examples.^Guides~Step-by-step recipes for common tasks.^Reference~Commands, settings and file formats.^Changelog~What changed in each release.|Documentation for the current release" \
+"b|Tailoring^Alterations^Sewing Studio|Alterations and made-to-measure clothes.^Clothes that fit, repaired with care.^A small sewing studio near the market.|Alterations~Hems, sleeves and waistlines adjusted.^Repairs~Zips, buttons and patches done while you wait.^Made to measure~Shirts and dresses cut for you.^Fabrics~Linen, wool and cotton from small mills.^Hours~Tuesday to Saturday, from 10 to 6.")"
+  if [[ $kind == p ]]; then
+    name="$(stub_pick Anna Clara Daniel Elena Felix Hanna Iris Jonas Lena Lucas Maya Nina Oscar Paula Ruth Simon Tom Vera)"
+    name+=" $(stub_pick Avery Bell Carter Dale Ellis Foster Grant Hale Hart Lowe Marsh Moreau Nolan Price Reyes Sato Vance Wells)"
+  else
+    name=$(stub_pick Alder Amber Ashgrove Birch Bluestone Bramble Brightwater Cedar Clover Copper Driftwood Eastgate Fern Fieldstone \
+      Foxglove Granite Greenway Hazel Heron Highland Hillcrest Juniper Kestrel Lakeside Lantern Larch Linden Maple Meadow Mill Moss \
+      Northfield Oakridge Orchard Pinecone Quiet\ Hill Red\ Door Riverside Rowan Saffron Saltmarsh Sparrow Stonebridge Sunfield \
+      Thistle Tidewater Two\ Rivers Westbrook Willow Wren)
+  fi
+  IFS='^' read -ra opts <<<"$sfx"; name+=" $(stub_pick "${opts[@]}")"
+  IFS='^' read -ra opts <<<"$tags"; tag=$(stub_pick "${opts[@]}")
+  # Три пункта из пяти в случайном порядке.
+  IFS='^' read -ra opts <<<"$items"
+  idx=(0 1 2 3 4)
+  for k in 0 1 2; do j=$(rnd "$k" 4); t=${idx[k]}; idx[k]=${idx[j]}; idx[j]=$t; done
+  ti=(); tx=()
+  for k in 0 1 2; do ti+=("${opts[${idx[k]}]%%~*}"); tx+=("${opts[${idx[k]}]#*~}"); done
+  read -r bg fg ac mu cd <<<"$(stub_pick "#f6f7f9 #1f2328 #0969da #57606a #ffffff" "#fdfaf4 #3b2f24 #8a5a2b #7a6a5a #fffdf8" \
+    "#111111 #eeeeee #d4a373 #a0a0a0 #1c1c1c" "#f4f1ea #2b2b2b #2f6f4f #6b6b6b #ffffff" "#fbfbfd #1d1d1f #c2410c #6e6e73 #ffffff" \
+    "#eef3f8 #102a43 #1f6feb #52606d #ffffff" "#fff8f3 #3d2c2e #b5485d #8c7376 #ffffff" "#f7f7f2 #222222 #6a4c93 #666666 #ffffff" \
+    "#0f172a #e2e8f0 #38bdf8 #94a3b8 #1e293b" "#fafaf9 #292524 #4d7c0f #78716c #ffffff")"
+  font=$(stub_pick "-apple-system,Segoe UI,Roboto,sans-serif" "Georgia,serif" "Helvetica,Arial,sans-serif" \
+    "ui-monospace,Menlo,Consolas,monospace" "Palatino,Book Antiqua,serif" "Verdana,Geneva,sans-serif")
+  rad=$(stub_pick 0 4px 6px 10px 16px)
+  addr=${foot:-$(rnd 2 180) $(stub_pick Mill\ Lane Station\ Road Church\ Street Bridge\ Street Park\ Avenue Market\ Square \
+    Garden\ Row Orchard\ Way River\ Walk Hill\ Road Elm\ Street Harbour\ Road Chapel\ Lane Meadow\ Close)}
+  copy="&copy; $year $name"
+  h="<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>$name</title><style>body{margin:0;font-family:$font;background:$bg;color:$fg}"
+  case $(rnd 1 5) in
+    1) h+="body{min-height:100vh;display:grid;place-items:center;text-align:center}main{max-width:560px;padding:32px 20px}h1{font-size:38px;margin:0 0 10px}p{color:$mu;font-size:18px;line-height:1.5}.b{display:inline-block;margin-top:14px;padding:10px 22px;border-radius:$rad;background:$ac;color:$cd}small{display:block;margin-top:44px;color:$mu;font-size:13px}</style></head><body><main><h1>$name</h1><p>$tag</p><p>${tx[0]}</p><span class=\"b\">${ti[1]}</span><small>$addr &middot; $copy</small></main>" ;;
+    2) h+="header{background:$ac;color:$cd;padding:44px 20px;text-align:center}h1{margin:0 0 6px;font-size:28px}header p{margin:0;opacity:.85}main{max-width:820px;margin:32px auto;padding:0 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.c{background:$cd;border:1px solid ${mu}33;border-radius:$rad;padding:18px}.c b{display:block;margin-bottom:6px}.c span{color:$mu;font-size:14px;line-height:1.5}footer{text-align:center;color:$mu;font-size:13px;padding:28px}</style></head><body><header><h1>$name</h1><p>$tag</p></header><main>"
+       for k in 0 1 2; do h+="<div class=\"c\"><b>${ti[k]}</b><span>${tx[k]}</span></div>"; done
+       h+="</main><footer>$addr &middot; $copy</footer>" ;;
+    3) h+="body{display:flex;min-height:100vh;line-height:1.6}nav{width:220px;background:$cd;border-right:1px solid ${mu}33;padding:28px 20px;box-sizing:border-box}nav b{display:block;margin-bottom:18px;color:$ac}nav p{margin:8px 0;color:$mu}main{flex:1;max-width:720px;padding:36px 32px}h1{font-size:26px;margin-top:0}h2{font-size:18px;margin:28px 0 6px}small{display:block;margin-top:40px;color:$mu}@media(max-width:640px){nav{display:none}}</style></head><body><nav><b>$name</b>"
+       for k in 0 1 2; do h+="<p>${ti[k]}</p>"; done
+       h+="</nav><main><h1>$tag</h1>"
+       for k in 0 1 2; do h+="<h2>${ti[k]}</h2><p>${tx[k]}</p>"; done
+       h+="<small>$copy</small></main>" ;;
+    4) h+="body{line-height:1.6}main{max-width:640px;margin:0 auto;padding:48px 20px}h1{font-size:24px;margin:0}header p{color:$mu;margin:4px 0 32px}article{padding:16px 0;border-top:1px solid ${mu}33}article h2{font-size:17px;margin:0;color:$ac}time{font-size:13px;color:$mu}article p{margin:6px 0 0}footer{margin-top:32px;font-size:13px;color:$mu}</style></head><body><main><header><h1>$name</h1><p>$tag</p></header>"
+       mon=(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec); mo=$((10#$(date +%m) - 1)); yy=$year
+       for k in 0 1 2; do
+         h+="<article><time>${mon[mo]} $(rnd 1 28), $yy</time><h2>${ti[k]}</h2><p>${tx[k]}</p></article>"
+         mo=$((mo - $(rnd 1 3))); ((mo >= 0)) || { mo=$((mo + 12)); yy=$((yy - 1)); }
+       done
+       h+="<footer>$addr &middot; $copy</footer></main>" ;;
+    *) h+=".t{background:$fg;color:$bg;padding:56px 20px}.t div,main{max-width:760px;margin:0 auto}h1{font-size:34px;margin:0 0 8px}.t p{margin:0;color:$ac}main{padding:28px 20px 48px}.r{display:flex;gap:24px;padding:18px 0;border-bottom:1px solid ${mu}33}.r b{flex:0 0 180px;color:$ac}.r span{color:$mu}footer{padding-top:24px;font-size:13px;color:$mu}@media(max-width:600px){.r{display:block}}</style></head><body><div class=\"t\"><div><h1>$name</h1><p>$tag</p></div></div><main>"
+       for k in 0 1 2; do h+="<div class=\"r\"><b>${ti[k]}</b><span>${tx[k]}</span></div>"; done
+       h+="<footer>$addr &middot; $copy</footer></main>" ;;
   esac
+  printf '%s</body></html>\n' "$h"
 }
 
 
@@ -1853,11 +1894,11 @@ PY
     install_kit_sub
     [[ $SINGLE == yes ]] || OPEN+=("$SUB_PORT/tcp")
   fi
-  # Всё на 443: nginx строит маршруты по подключениям из базы, заглушка – из копии.
+  # Заглушка – из копии (её показывают nginx и Hysteria2). Всё на 443: nginx строит маршруты по подключениям из базы.
+  install -d -m 755 /var/www/kit
+  [[ -f $tmp/var/www/kit/index.html ]] && install -m 644 "$tmp/var/www/kit/index.html" /var/www/kit/index.html
   if [[ $SINGLE == yes ]]; then
     [[ -n $DOMAIN ]] && { issue_domain_cert || die "Не удалось получить сертификат для $DOMAIN: порт 80 должен быть свободен, а A-запись домена указывать на этот сервер. Лог: /var/log/kit-domain-cert.log"; }
-    install -d -m 755 /var/www/kit
-    [[ -f $tmp/var/www/kit/index.html ]] && install -m 644 "$tmp/var/www/kit/index.html" /var/www/kit/index.html
     setup_nginx
   fi
 
