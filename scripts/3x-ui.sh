@@ -1738,6 +1738,85 @@ for f in files:
 PY
 }
 
+# Файлы сертификатов, на которые ссылаются подключения в базе: без них Xray не стартует.
+db_cert_files() {
+  python3 - <<'PY'
+import json, sqlite3
+db = sqlite3.connect("file:/etc/x-ui/x-ui.db?mode=ro", uri=True)
+out = set()
+for s, st in db.execute("SELECT settings, stream_settings FROM inbounds"):
+    for raw, key in ((st, "stream"), (s, "settings")):
+        try:
+            j = json.loads(raw)
+            if key == "stream":
+                out.update(c.get("certificateFile") for c in j["tlsSettings"]["certificates"])
+            else:
+                out.add(j["server"]["certificate"])  # TUIC
+        except Exception:
+            pass
+for f in sorted(x for x in out if isinstance(x, str) and x and "\n" not in x):
+    print(f)
+PY
+}
+
+pin_cert_in_db() { # сертификат отпечаток: закрепить отпечаток в подключениях с этим сертификатом (уходит в ссылки)
+  python3 - "$1" "$2" <<'PY'
+import json, sqlite3, sys
+cert, pin = sys.argv[1], sys.argv[2]
+db = sqlite3.connect("/etc/x-ui/x-ui.db")
+for iid, raw in db.execute("SELECT id, stream_settings FROM inbounds").fetchall():
+    try:
+        st = json.loads(raw)
+        t = st["tlsSettings"]
+        if not any(c.get("certificateFile") == cert for c in t["certificates"]):
+            continue
+    except Exception:
+        continue
+    t["settings"] = dict(t.get("settings") or {}, pinnedPeerCertSha256=[pin])
+    db.execute("UPDATE inbounds SET stream_settings = ? WHERE id = ?", (json.dumps(st, indent=2, ensure_ascii=False), iid))
+db.commit(); db.close()
+PY
+}
+
+# Let's Encrypt на новый IP мог не выдаться (лимит выпусков, закрытый порт 80), а подключения из копии ссылаются
+# на его файлы. Тогда на тот же путь кладём самоподписанный сертификат и закрепляем его отпечаток в подключениях,
+# как при обычной установке без Let's Encrypt. Путь из базы – только наш (/root/cert/ip или /root/cert/self).
+restore_self_cert() { # путь-к-fullchain.pem
+  local cert=$1 dir san="IP:$HOST" pin
+  if [[ ! $cert =~ ^/root/cert/(ip|self)/fullchain\.pem$ ]]; then
+    printf '%s\n' "${R}!${N}  Подключения ссылаются на сертификат $cert, а его нет: Xray не запустится. Положите файл на место и перезапустите: systemctl restart x-ui" >&2
+    later "Нет сертификата $cert, на который ссылаются подключения: Xray не запустится, пока файл не вернётся на место."
+    return 0
+  fi
+  dir=${cert%/*}
+  [[ $HOST =~ ^[0-9.]+$ ]] || san="DNS:$HOST"
+  if [[ $dir == /root/cert/ip ]]; then
+    printf '%s\n' "${R}!${N}  Let's Encrypt не выдал сертификат на IP $HOST (лимит: 5 сертификатов в неделю на один IP, закрытый порт 80 или сбой; лог: /var/log/3x-ui-install.log)." >&2
+    echo "   Ставлю самоподписанный: ссылки на подключения работают (отпечаток в них), браузер покажет предупреждение, а подписка в приложениях может не открыться." >&2
+    later "Сертификат на IP самоподписанный (Let's Encrypt не выдал): пользуйтесь ссылками на отдельные подключения (kit user link имя), подписка в приложениях может не открыться."
+    SELF_IP_CERT=yes
+  fi
+  install -d -m 700 "$dir"
+  (umask 077; openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout "$dir/privkey.pem" \
+    -out "$cert" -subj "/CN=$HOST" -addext "subjectAltName=$san" -days 3650 2>/dev/null)
+  chmod 644 "$cert"
+  chmod 600 "$dir/privkey.pem"
+  pin=$(openssl x509 -in "$cert" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')
+  # Панель берёт тот же путь из настроек копии. «x-ui cert» не зовём: он включает TLS и у встроенной подписки,
+  # а kit-sub ходит к ней по http.
+  pin_cert_in_db "$cert" "$pin"
+}
+
+xray_alive() { # ждём ядро Xray (дочерний процесс x-ui) до 20 секунд
+  local i pid
+  for i in $(seq 1 10); do
+    pid=$(systemctl show -p MainPID --value x-ui 2>/dev/null || true)
+    [[ $pid =~ ^[1-9][0-9]*$ ]] && pgrep -P "$pid" '^xray-linux-' >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
 restore_main() { # файл
   local file=$1 tmp old_ip=""
   [[ -f $file ]] || die "Нет файла $file. Сначала скопируйте копию на этот сервер: scp kit-backup-….tar.gz root@IP:"
@@ -1882,6 +1961,10 @@ PY
     # Адрес в ссылках, взятый из копии, тоже был старым IP (со своим доменом он остаётся доменом).
     [[ ${LINK_HOST:-} == "$old_ip" ]] && LINK_HOST=$HOST
   fi
+  local cf
+  while IFS= read -r cf; do
+    [[ -s $cf ]] || restore_self_cert "$cf"
+  done < <(db_cert_files)
   systemctl start x-ui
   connect_panel
   set_xray_core
@@ -1928,9 +2011,16 @@ PY
   local n_in n_cl
   n_in=$(api GET inbounds/list | jq length)
   n_cl=$(api GET inbounds/list | jq '[.[] | (.settings | if type == "string" then fromjson else . end).clients // [] | .[].email] | unique | length')
+  local core_ok=yes
+  xray_alive || core_ok=no
   kit_banner
   echo
-  echo "${G}${B}Готово! Сервер восстановлен из копии: $n_in подключений, $n_cl клиентских записей.${N}"
+  if [[ $core_ok == yes ]]; then
+    echo "${G}${B}Готово! Сервер восстановлен из копии: $n_in подключений, $n_cl клиентских записей.${N}"
+  else
+    echo "${R}${B}Сервер восстановлен из копии ($n_in подключений, $n_cl клиентских записей), но ядро Xray не запустилось: подключения не работают.${N}"
+    echo "Причина – в журнале: ${B}tail -n 30 /var/log/x-ui/3xui.log${N}, проверка: ${B}kit check${N}"
+  fi
   echo "Логин и пароль панели прежние, адрес панели и подписки: ${B}cat $RESULT${N}"
   echo
   if [[ -n $old_ip ]]; then
@@ -1942,6 +2032,13 @@ PY
     echo "Клиентам ничего менять не нужно: ключи, ссылки и подписки те же."
   fi
   [[ $PANEL_SSL == custom ]] && echo "Направьте A-запись домена ${B}$HOST${N} на IP этого сервера, если ещё не сделали."
+  if ((${#WARNINGS[@]})); then
+    echo
+    echo "${B}ВНИМАНИЕ${N}"
+    local w
+    for w in "${WARNINGS[@]}"; do echo "  ${Y}!${N} $w"; done
+  fi
+  [[ $core_ok == yes ]] || exit 1
   return 0
 }
 
