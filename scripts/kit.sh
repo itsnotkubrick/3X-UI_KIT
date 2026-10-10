@@ -947,6 +947,14 @@ check_system() {
   fi
   used=$(df -P / | awk 'NR==2 {gsub("%", "", $5); print $5}')
   if ((${used:-0} >= 95)); then c_warn "диск заполнен на ${used}%"; else c_ok "место на диске: занято ${used:-?}%"; fi
+  local cc
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+  if [[ $cc == bbr ]]; then
+    c_ok "контроль перегрузок TCP: BBR"
+  else
+    c_warn "контроль перегрузок TCP: $cc (при потерях пакетов лучше BBR: kit fix или kit net bbr on)"
+    CHECK_FIX+=(bbr)
+  fi
 }
 
 # Маскировка: известный сайт на чужом IP и запасные порты, которые на посторонний запрос отвечают пустой страницей.
@@ -1103,7 +1111,28 @@ fix_action() { # код
       else warn "Конфиг nginx не проходит проверку – сертификат не перечитываю."; fi
       warn "Если сертификат всё ещё просрочен, запустите продление: ~/.acme.sh/acme.sh --cron" ;;
     ntp) fix_ntp ;;
+    bbr) fix_bbr ;;
   esac
+}
+
+fix_bbr() {
+  say "Включаю BBR"
+  modprobe tcp_bbr >/dev/null 2>&1 || true
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    mkdir -p /etc/sysctl.d
+    cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
+    sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+    if [[ $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true) == bbr ]]; then
+      say "BBR включён."
+    else
+      warn "BBR не применился через sysctl."
+    fi
+  else
+    warn "Ядро системы не поддерживает BBR."
+  fi
 }
 
 # На минимальном Debian 13 нет клиента NTP, и «timedatectl set-ntp» отвечает «NTP not supported».
@@ -2279,6 +2308,13 @@ net_show() {
     if [[ -n $(hy_masq_state) ]]; then echo "Hysteria2 отвечает на посторонний запрос страницей сайта (выключить: kit net masq off)"
     else echo "Hysteria2 без маскировки под сайт (включить: kit net masq on)"; fi
   fi
+  local cc
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+  if [[ $cc == bbr ]]; then
+    echo "Контроль перегрузок TCP: BBR (выключить: kit net bbr off)"
+  else
+    echo "Контроль перегрузок TCP: $cc (включить BBR: kit net bbr on)"
+  fi
 }
 
 net_toggle() { # on|off имя [-y]
@@ -2333,6 +2369,26 @@ net_fp() { # отпечаток
   echo "Вернуть прежний: kit net fp chrome."
 }
 
+net_bbr() { # on|off
+  local act=${1:-} cc
+  case ${act,,} in
+    on)
+      fix_bbr
+      ;;
+    off)
+      say "Отключаю BBR"
+      rm -f /etc/sysctl.d/99-bbr.conf
+      sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+      cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+      say "Алгоритм TCP: $cc."
+      ;;
+    *)
+      cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+      echo "Текущий алгоритм TCP: $cc (kit net bbr on|off)"
+      ;;
+  esac
+}
+
 cmd_net() {
   local sub=${1:-}
   [[ -z $sub ]] || shift
@@ -2347,7 +2403,8 @@ cmd_net() {
     panel) net_panel "$@" ;;
     split) net_split "$@" ;;
     vision) case ${1:-} in on) cmd_vision --all ;; off) cmd_vision --all off ;; *) die "kit net vision on|off" ;; esac ;;
-    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | panel domain|ip | split on|off|check|apply | vision on|off]" ;;
+    bbr) net_bbr "$@" ;;
+    *) die "kit net [site | port имя порт | off имя | on имя | fp отпечаток | masq on|off | dns on|off | panel domain|ip | split on|off|check|apply | vision on|off | bbr on|off]" ;;
   esac
 }
 
@@ -2489,12 +2546,25 @@ n_fp() {
   net_fp "${fps[REPLY-1]}"
 }
 
+n_bbr() {
+  local cc
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+  echo "Текущий алгоритм контроля перегрузок TCP: ${B}$cc${N}"
+  if [[ $cc == bbr ]]; then
+    ask_num "1 – выключить BBR (вернуть cubic), Enter – оставить: "
+    case $REPLY in 1) net_bbr off ;; esac
+  else
+    ask_num "1 – включить BBR, Enter – оставить: "
+    case $REPLY in 1) net_bbr on ;; esac
+  fi
+}
+
 menu_net() {
   local c
   while :; do
     echo
-    box "Протоколы, порты и маскировка" "1. Показать протоколы и порты" "2. Сменить сайт маскировки" "3. Сменить порт протокола" "4. Выключить или включить протокол" "5. Сменить отпечаток клиента" "6. Второй REALITY на высоком порту" "7. Панель и подписка: по IP или по домену" "" "0. Назад"
-    ask_num "Выбор [0-7]: "; c=$REPLY
+    box "Протоколы, порты и маскировка" "1. Показать протоколы и порты" "2. Сменить сайт маскировки" "3. Сменить порт протокола" "4. Выключить или включить протокол" "5. Сменить отпечаток клиента" "6. Второй REALITY на высоком порту" "7. Панель и подписка: по IP или по домену" "8. Ускорение TCP (BBR)" "" "0. Назад"
+    ask_num "Выбор [0-8]: "; c=$REPLY
     case $c in
       1) run_action net_show; pause ;;
       2) run_action n_site; pause ;;
@@ -2503,6 +2573,7 @@ menu_net() {
       5) run_action n_fp; pause ;;
       6) run_action net_toggle on reality2; pause ;;
       7) run_action n_panel; pause ;;
+      8) run_action n_bbr; pause ;;
       0 | "") return 0 ;;
       *) echo "Нет такого пункта." ;;
     esac
