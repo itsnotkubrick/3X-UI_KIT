@@ -419,7 +419,7 @@ main() {
     die "3X-UI уже установлена другим способом – не трогаю её. Удалите её (x-ui uninstall) или добавьте REALITY в панели вручную."
   fi
 
-  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no restore=""
+  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no restore="" BBR=yes
   while [[ $# -gt 0 ]]; do
     case $1 in
       --port | --sni | --panel-ssl | --host | --user | --protocols | --domain | --cert | --key | --restore | --panel-on)
@@ -438,6 +438,7 @@ main() {
       --key) ukey=$2; shift 2 ;;
       --restore) restore=$2; shift 2 ;;
       --panel-on) PANEL_ON=${2,,}; shift 2 ;;
+      --no-bbr) BBR=no; shift ;;
       --no-ufw) UFW=no; shift ;;
       -y|--yes) yes=yes; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -611,6 +612,7 @@ main() {
   apt-get update -qq
   apt-get install -y -qq curl jq openssl qrencode ca-certificates iproute2 ufw socat cron unzip >/dev/null
   ok "curl, jq, openssl, qrencode, ufw и другое"
+  [[ $BBR == yes ]] && setup_bbr
 
   # --- официальный установщик 3X-UI с закреплённой версией ---
   step "Панель 3X-UI $XUI_VERSION"
@@ -1267,6 +1269,28 @@ awg_attach() { # имя subId [лимит-байт] [срок-мс] [устро�
         '{client: {email: $e, subId: $s, totalGB: $t, expiryTime: $x, limitIp: $l, enable: true, comment: "kit"}, inboundIds: [$i]}')" >/dev/null
     fi
   done
+}
+
+setup_bbr() {
+  local cc
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+  [[ $cc == bbr ]] && { ok "BBR уже включён"; return 0; }
+  modprobe tcp_bbr >/dev/null 2>&1 || true
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    mkdir -p /etc/sysctl.d
+    cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
+    sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+    if [[ $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true) == bbr ]]; then
+      ok "BBR (контроль перегрузок TCP) включён"
+    else
+      warn "BBR не применился через sysctl – оставил системный алгоритм"
+    fi
+  else
+    say "Ядро системы не поддерживает BBR – оставил системный алгоритм TCP"
+  fi
 }
 
 KIT_CLI_URL="$KIT_RAW/scripts/kit.sh"
@@ -2120,6 +2144,7 @@ usage() {
   --host 1.2.3.4      адрес в ссылке, если IP определился неверно
   --restore файл      поднять сервер из резервной копии kit backup (на чистом VPS)
   --panel-on ip|domain панель и подписка по IP (по умолчанию) или по своему домену (нужен --domain)
+  --no-bbr            не включать алгоритм BBR (оставить системный по умолчанию)
   --no-ufw            не трогать файрвол
   -y                  не задавать вопросов
 EOF
